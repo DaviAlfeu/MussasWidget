@@ -20,7 +20,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import (
     Qt, QTimer, QUrl, QPoint, pyqtSignal,
-    QPropertyAnimation, QParallelAnimationGroup, QEasingCurve, QAbstractAnimation, QEvent
+    QPropertyAnimation, QParallelAnimationGroup, QEasingCurve, QAbstractAnimation, QEvent, QSharedMemory
 )
 from PyQt6.QtGui import (
     QFontDatabase, QCursor, QPixmap, QIcon, QAction, 
@@ -1236,8 +1236,12 @@ class WidgetFrutigerAero(QWidget):
 
 if __name__ == '__main__':
     signal.signal(signal.SIGINT, signal.SIG_DFL)
-    QApplication.setQuitOnLastWindowClosed(False) 
     app = QApplication(sys.argv)
+    shared_memory = QSharedMemory("MussasWidget_SingleInstance")
+    if shared_memory.attach():
+        sys.exit(0)
+    shared_memory.create(1)
+    QApplication.setQuitOnLastWindowClosed(False) 
     widget = WidgetFrutigerAero()
     widget.show()
     sys.exit(app.exec())
