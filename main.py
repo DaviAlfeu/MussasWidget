@@ -26,7 +26,7 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
 
-APP_VERSION = "1.3.1"
+APP_VERSION = "1.0.0"
 URL_UPDATE_CHECK = "https://raw.githubusercontent.com/DaviAlfeu/MussasWidget/main/version.txt"
 URL_DOWNLOAD_EXE = "https://github.com/DaviAlfeu/MussasWidget/raw/main/WidgetAniversarios.exe"
 URL_CSV_ANIVERSARIOS = "https://docs.google.com/spreadsheets/d/1W1cX9dCAFnLPjDImSB6rjSSC0GhvOX0rp_HiaHeHAGI/export?format=csv&gid=0"
@@ -562,6 +562,7 @@ class WidgetFrutigerAero(QWidget):
         self.top_extra = 26
         self.oldPos = None
         self.fixado = False
+        self.atualizando = False
         self.pagina_atual = 0
         self.anim_group = None
         self.borda_cor = None
@@ -892,7 +893,7 @@ class WidgetFrutigerAero(QWidget):
         config_app.pos_x = self.x()
         config_app.pos_y = self.y()
         config_app.salvar()
-        if config_app.segundo_plano:
+        if config_app.segundo_plano and not self.atualizando:
             event.ignore()
             self.hide()
             if self.calendario_aberto: self.janela_calendario.hide()
@@ -1178,6 +1179,177 @@ class WidgetFrutigerAero(QWidget):
     def alternar_fixacao(self):
         self.fixado = not self.fixado
         self.btn_pin.setText("📌" if self.fixado else "🔓")
+
+    def normalizar_versao(self, valor):
+        """Converte versões como v1.3.1 ou 1.3.1 em uma tupla comparável."""
+        texto = str(valor or "").strip().lower()
+        if texto.startswith("v"):
+            texto = texto[1:]
+        numeros = []
+        for parte in texto.split("."):
+            numero = ""
+            for caractere in parte:
+                if caractere.isdigit():
+                    numero += caractere
+                else:
+                    break
+            numeros.append(int(numero or 0))
+        while len(numeros) < 4:
+            numeros.append(0)
+        return tuple(numeros[:4])
+
+    def verificar_atualizacoes(self, manual=False):
+        """Consulta version.json no GitHub e inicia a atualização quando houver versão nova."""
+        if not getattr(sys, "frozen", False):
+            if manual:
+                QMessageBox.information(
+                    self, "Atualizações",
+                    "O atualizador automático só funciona no MussasWidget.exe compilado."
+                )
+            return
+
+        try:
+            req = urllib.request.Request(
+                URL_UPDATE_CHECK,
+                headers={"User-Agent": "MussasWidget-Updater"}
+            )
+            with urllib.request.urlopen(req, timeout=10) as resposta:
+                dados = json.loads(resposta.read().decode("utf-8"))
+
+            versao_remota = str(dados.get("version", "")).strip()
+            url_download = str(dados.get("download_url", "")).strip()
+            if not versao_remota or not url_download:
+                raise ValueError("version.json não contém version ou download_url.")
+
+            if not url_download.lower().startswith((
+                "https://github.com/",
+                "https://objects.githubusercontent.com/"
+            )):
+                raise ValueError("A URL de atualização não é um endereço HTTPS válido do GitHub.")
+
+            if self.normalizar_versao(versao_remota) <= self.normalizar_versao(APP_VERSION):
+                if manual:
+                    QMessageBox.information(
+                        self, "Atualizações",
+                        f"Você já está usando a versão mais recente ({APP_VERSION})."
+                    )
+                return
+
+            resposta = QMessageBox.question(
+                self,
+                "Atualização disponível",
+                f"Uma nova versão do MussasWidget está disponível.\n\n"
+                f"Atual: {APP_VERSION}\nNova: {versao_remota}\n\n"
+                "Deseja baixar e instalar agora?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes
+            )
+            if resposta == QMessageBox.StandardButton.Yes:
+                self._baixar_e_instalar_atualizacao(url_download, versao_remota)
+
+        except Exception as e:
+            if manual:
+                QMessageBox.warning(
+                    self, "Erro ao verificar atualizações",
+                    f"Não foi possível verificar a atualização.\n\n{e}"
+                )
+
+    def _baixar_e_instalar_atualizacao(self, url_download, versao_remota):
+        """Baixa o novo EXE e usa um BAT temporário para substituir o EXE em execução."""
+        try:
+            exe_atual = os.path.abspath(sys.executable)
+            pasta_exe = os.path.dirname(exe_atual)
+
+            # O novo EXE fica no mesmo diretório do atual para que o BAT possa
+            # fazer a troca sem depender de permissões extras do TEMP.
+            fd, novo_exe = tempfile.mkstemp(
+                prefix="MussasWidget_update_", suffix=".exe", dir=pasta_exe
+            )
+            os.close(fd)
+
+            try:
+                req = urllib.request.Request(
+                    url_download,
+                    headers={"User-Agent": "MussasWidget-Updater"}
+                )
+                with urllib.request.urlopen(req, timeout=120) as resposta, open(novo_exe, "wb") as arquivo:
+                    while True:
+                        bloco = resposta.read(1024 * 1024)
+                        if not bloco:
+                            break
+                        arquivo.write(bloco)
+            except Exception:
+                try:
+                    os.remove(novo_exe)
+                except OSError:
+                    pass
+                raise
+
+            fd, bat_path = tempfile.mkstemp(
+                prefix="MussasWidget_updater_", suffix=".bat", dir=tempfile.gettempdir()
+            )
+            os.close(fd)
+
+            pid = os.getpid()
+            exe_alvo = exe_atual.replace("%", "%%")
+            novo_alvo = novo_exe.replace("%", "%%")
+            bat_alvo = bat_path.replace("%", "%%")
+
+            conteudo_bat = f'''@echo off
+setlocal
+set "PID={pid}"
+set "OLD={exe_alvo}"
+set "NEW={novo_alvo}"
+set "BAT={bat_alvo}"
+
+:WAIT
+tasklist /FI "PID eq %PID%" 2>NUL | findstr /R /C:" %PID% " >NUL
+if not errorlevel 1 (
+    timeout /t 1 /nobreak >NUL
+    goto WAIT
+)
+
+if not exist "%NEW%" goto CLEANUP
+
+:REPLACE
+move /Y "%NEW%" "%OLD%" >NUL 2>&1
+if exist "%OLD%" goto START
+timeout /t 1 /nobreak >NUL
+goto REPLACE
+
+:START
+start "" "%OLD%"
+
+:CLEANUP
+timeout /t 1 /nobreak >NUL
+del /F /Q "%BAT%" >NUL 2>&1
+exit /B
+'''
+
+            with open(bat_path, "w", encoding="mbcs") as arquivo:
+                arquivo.write(conteudo_bat)
+
+            subprocess.Popen(
+                ["cmd.exe", "/c", bat_path],
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                close_fds=True
+            )
+
+            QMessageBox.information(
+                self,
+                "Atualização pronta",
+                f"A versão {versao_remota} foi baixada.\n\n"
+                "O MussasWidget será fechado e atualizado automaticamente."
+            )
+            self.atualizando = True
+            QApplication.quit()
+
+        except Exception as e:
+            QMessageBox.warning(
+                self,
+                "Erro na atualização",
+                f"Não foi possível baixar a nova versão.\n\n{e}"
+            )
 
     def fechar_app(self):
         self.timer_calendario_autoclose.stop()
