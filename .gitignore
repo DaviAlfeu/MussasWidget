@@ -7,18 +7,14 @@ build/
 dist/
 *.spec
 
-# Arquivos de configuração/estado local
+# Arquivos locais do aplicativo
 config.json
 parabens_played.txt
+version.txt
 
 # Ambiente virtual
-venv/
 .venv/
-env/
+venv/
 
-# Arquivos temporários
-*.tmp
-*.log
-
-# VS Code
+# IDE
 .vscode/
