@@ -8,13 +8,15 @@ import json
 import winreg
 import webbrowser
 import random
+import tempfile
+import subprocess
 from datetime import date, datetime
 
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QLabel, QFrame, QPushButton, 
     QHBoxLayout, QVBoxLayout, QGridLayout, QDialog, QCheckBox, 
     QSystemTrayIcon, QMenu, QGraphicsScene, QGraphicsBlurEffect,
-    QStackedWidget, QScrollArea, QComboBox, QSlider
+    QStackedWidget, QScrollArea, QComboBox, QSlider, QMessageBox
 )
 from PyQt6.QtCore import (
     Qt, QTimer, QUrl, QPoint, pyqtSignal,
@@ -26,8 +28,8 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
 
-APP_VERSION = "1.0.0"
-URL_UPDATE_CHECK = "https://raw.githubusercontent.com/DaviAlfeu/MussasWidget/main/version.txt"
+APP_VERSION = "1.0.1"
+URL_UPDATE_CHECK = "https://raw.githubusercontent.com/DaviAlfeu/MussasWidget/main/version.json"
 URL_DOWNLOAD_EXE = "https://github.com/DaviAlfeu/MussasWidget/raw/main/WidgetAniversarios.exe"
 URL_CSV_ANIVERSARIOS = "https://docs.google.com/spreadsheets/d/1W1cX9dCAFnLPjDImSB6rjSSC0GhvOX0rp_HiaHeHAGI/export?format=csv&gid=0"
 URL_CSV_JOGO = "https://docs.google.com/spreadsheets/d/1W1cX9dCAFnLPjDImSB6rjSSC0GhvOX0rp_HiaHeHAGI/export?format=csv&gid=36262169"
@@ -68,7 +70,6 @@ def indice_espessura(valor):
     return min(range(len(NIVEIS_ESPESSURA)), key=lambda i: abs(NIVEIS_ESPESSURA[i] - valor))
 
 def get_app_path():
-    # Caminho do executável/script usado para dados persistentes e registro do Windows.
     if getattr(sys, 'frozen', False):
         return os.path.abspath(sys.executable)
     return os.path.abspath(__file__)
@@ -77,8 +78,6 @@ def get_app_dir():
     return os.path.dirname(get_app_path())
 
 def resource_path(filename):
-    # Arquivos incluídos pelo PyInstaller ficam em _MEIPASS no modo --onefile.
-    # No modo normal, ficam ao lado do main.py.
     if getattr(sys, 'frozen', False):
         base = getattr(sys, '_MEIPASS', get_app_dir())
     else:
@@ -86,7 +85,6 @@ def resource_path(filename):
     return os.path.join(base, filename)
 
 def external_resource_path(filename):
-    # Primeiro procura ao lado do .exe; depois tenta o pacote interno do PyInstaller.
     external = os.path.join(get_app_dir(), filename)
     if os.path.exists(external):
         return external
@@ -105,6 +103,55 @@ def carregar_fontes():
             for arquivo in os.listdir(pasta):
                 if arquivo.lower().endswith(('.ttf', '.otf')):
                     QFontDatabase.addApplicationFont(os.path.abspath(os.path.join(pasta, arquivo)))
+
+def versao_tuple(valor):
+    try:
+        return tuple(int(p) for p in str(valor).strip().lstrip("vV").split(".")[:4])
+    except Exception:
+        return (0,)
+
+def caminho_executavel_atual():
+    return os.path.abspath(sys.executable) if getattr(sys, "frozen", False) else os.path.abspath(__file__)
+
+def executar_atualizacao_bat(novo_exe):
+    exe_atual = caminho_executavel_atual()
+    temp_dir = tempfile.gettempdir()
+    bat_path = os.path.join(temp_dir, f"MussasWidget_update_{os.getpid()}.bat")
+    conteudo = (
+        "@echo off\r\n"
+        "setlocal\r\n"
+        f'set "APP={exe_atual}"\r\n'
+        f'set "NEW={novo_exe}"\r\n'
+        f'set "PID={os.getpid()}"\r\n'
+        ":WAIT\r\n"
+        'tasklist /FI "PID eq %PID%" 2>NUL | find "%PID%" >NUL\r\n'
+        "if not errorlevel 1 (\r\n"
+        " timeout /t 1 /nobreak >NUL\r\n"
+        " goto WAIT\r\n"
+        ")\r\n"
+        "timeout /t 1 /nobreak >NUL\r\n"
+        "if not exist %NEW% (\r\n"
+        " del /q %NEW% >NUL 2>&1\r\n"
+        ' del "%~f0" >NUL 2>&1\r\n'
+        " exit /b 1\r\n"
+        ")\r\n"
+        "move /Y %NEW% %APP% >NUL 2>&1\r\n"
+        "if errorlevel 1 (\r\n"
+        " copy /Y %NEW% %APP% >NUL 2>&1\r\n"
+        " if errorlevel 1 (\r\n"
+        "  del /q %NEW% >NUL 2>&1\r\n"
+        '  del "%~f0" >NUL 2>&1\r\n'
+        "  exit /b 1\r\n"
+        " )\r\n"
+        " del /q %NEW% >NUL 2>&1\r\n"
+        ")\r\n"
+        'start "" %APP%\r\n'
+        'del "%~f0" >NUL 2>&1\r\n'
+    )
+    with open(bat_path, "w", encoding="utf-8", newline="") as f:
+        f.write(conteudo)
+    flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
+    subprocess.Popen(["cmd.exe", "/c", bat_path], creationflags=flags, close_fds=True)
 
 class Configuracoes:
     def __init__(self):
@@ -152,7 +199,6 @@ class Configuracoes:
 config_app = Configuracoes()
 
 def normalizar_cor_hex(valor):
-    """Aceita HEX com ou sem #. Retorna branco se estiver vazio/inválido."""
     valor = (valor or "").strip().replace(" ", "")
     if valor.startswith("#"):
         valor = valor[1:]
@@ -169,9 +215,6 @@ def aplicar_css_fonte_base(key):
     peso = "bold" if f["peso"] == "bold" else "normal"
     return f"font-family: '{f['fonte']}', 'Segoe UI'; font-size: {f['tamanho']}px; font-weight: {peso}; background: transparent; border: none;"
 
-# ==========================================
-# LABEL COM BORDA (TEXT STROKE REAL)
-# ==========================================
 class OutlineLabel(QLabel):
     def __init__(self, text="", parent=None):
         super().__init__(text, parent)
@@ -210,9 +253,6 @@ class OutlineLabel(QLabel):
         painter.drawText(rect, flags, text)
         painter.end()
 
-# ==========================================
-# CONTAINER DE FUNDO (DESFOQUE / OPACIDADE)
-# ==========================================
 class BlurredBackgroundFrame(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -249,10 +289,8 @@ class BlurredBackgroundFrame(QFrame):
                 else:
                     self.bg_pixmap = pix
         else:
-            # Sem Wallpaper: Apenas fundo transparente controlado pelo slider (Desfoque -> Transparência)
             self.bg_pixmap = None
             base_color = QColor(245, 245, 245) if modo_claro else QColor(25, 25, 25)
-            # Mapeia blur (0 a 50) para Opacidade (30 a 255)
             alpha = 30 + int((blur_radius / 50.0) * 225)
             base_color.setAlpha(alpha)
             self.overlay_color = base_color
@@ -277,9 +315,6 @@ class BlurredBackgroundFrame(QFrame):
         painter.setPen(pen)
         painter.drawPath(path)
 
-# ==========================================
-# JANELA DE CONFIGURAÇÕES
-# ==========================================
 class JanelaConfiguracoes(QDialog):
     def __init__(self, parent_widget):
         super().__init__(parent_widget)
@@ -328,6 +363,9 @@ class JanelaConfiguracoes(QDialog):
         self.preview_frame = BlurredBackgroundFrame(self)
         self.preview_frame.setFixedSize(100, 100) 
         
+        self.lbl_versao = QLabel(f"Versão atual: {APP_VERSION}")
+        self.lbl_versao.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
         self.btn_update = QPushButton("Verificar Atualizações")
         self.btn_update.clicked.connect(lambda: self.parent_widget.verificar_atualizacoes(manual=True))
         
@@ -345,6 +383,7 @@ class JanelaConfiguracoes(QDialog):
         layout.addSpacing(5)
         layout.addWidget(self.preview_frame, alignment=Qt.AlignmentFlag.AlignCenter)
         layout.addStretch()
+        layout.addWidget(self.lbl_versao)
         layout.addWidget(self.btn_update)
         
         self.check_tema.toggled.connect(self.atualizar_preview)
@@ -386,9 +425,6 @@ class JanelaConfiguracoes(QDialog):
         self.parent_widget.aplicar_sempre_no_topo()
         self.parent_widget.aplicar_tema()
 
-# ==========================================
-# MINI CALENDÁRIO
-# ==========================================
 class ClickableMes(OutlineLabel):
     clicked = pyqtSignal(int)
     def __init__(self, text, index):
@@ -446,9 +482,6 @@ class JanelaCalendario(QWidget):
         self.layout_nomes.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.scroll.setWidget(self.scroll_content)
 
-        # Qualquer clique dentro da página de lista retorna aos meses.
-        # Os labels dos meses da grade não fazem parte desta página, então
-        # continuam funcionando normalmente.
         for widget in (self.page_grid, self.page_list, self.lbl_titulo_mes, self.scroll, self.scroll.viewport(), self.scroll_content):
             widget.installEventFilter(self)
         for lbl in self.labels_meses:
@@ -506,10 +539,7 @@ class JanelaCalendario(QWidget):
 
     def eventFilter(self, obj, event):
         if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
-            # Qualquer clique dentro do calendário conta como interação.
             self.main_app.reiniciar_timer_calendario()
-
-            # Na página de aniversariantes, qualquer clique volta para os meses.
             if self.stacked.currentIndex() == 1:
                 self.stacked.setCurrentIndex(0)
                 return True
@@ -531,29 +561,19 @@ class JanelaCalendario(QWidget):
         for i, lbl in enumerate(self.labels_meses):
             mes = i + 1
             lbl.atualizar_estilo(css_base, cor_texto, borda_cor, esp_borda)
-            
-            # Precisamos aplicar propriedades de fundo diretamente no label para hover visual
             bg_css = f"QLabel {{ background: transparent; }} QLabel:hover {{ background-color: rgba(120,120,120,80); border-radius: 5px; }}"
             if mes in meses_com_aniv:
                 bg_css = f"QLabel {{ background-color: rgba(120,120,120,50); border-radius: 5px; }} QLabel:hover {{ background-color: rgba(120,120,120,100); }}"
                 lbl.setCursor(Qt.CursorShape.PointingHandCursor)
             else:
                 lbl.setCursor(Qt.CursorShape.PointingHandCursor)
-                
-            # Combina o estilo base com o hover
             lbl.setStyleSheet(lbl.styleSheet() + bg_css)
 
-# ==========================================
-# WIDGET PRINCIPAL
-# ==========================================
 class WidgetFrutigerAero(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        
-        # A janela principal tem um tamanho FIXO e invisível no topo.
-        # Isso resolve totalmente o "pulo" do widget ao abrir as opções.
         self.resize(198, 176) 
         
         carregar_fontes()
@@ -585,17 +605,14 @@ class WidgetFrutigerAero(QWidget):
         self.timer_skip.setSingleShot(True)
         self.timer_skip.timeout.connect(lambda: (setattr(self, 'aniversario_pulado', True), self.atualizar_interface_aniversario()))
 
-        # Animação do parabéns: só fica liberada 3 segundos após a abertura do app.
         self.aniversario_animacao_pronta = False
         self.aniversario_animacao_executada = False
         self.animacao_parabens = None
         QTimer.singleShot(3000, self.liberar_animacao_aniversario)
 
-        # Fundo que cresce para cima
         self.container = BlurredBackgroundFrame(self)
         self.container.setGeometry(24, 26, 150, 150)
 
-        # Onde ficam as páginas (estático na tela)
         self.pages_container = QWidget(self)
         self.pages_container.setGeometry(24, 26, 150, 150)
 
@@ -608,7 +625,6 @@ class WidgetFrutigerAero(QWidget):
                 self.player.setSource(QUrl.fromLocalFile(audio_path))
                 break
 
-        # ================= PÁGINAS =================
         self.page_aniv = QWidget(self.pages_container)
         self.page_aniv.setGeometry(0, 0, 150, 150)
         self.nome_label = OutlineLabel("Carregando...", self.page_aniv)
@@ -632,7 +648,6 @@ class WidgetFrutigerAero(QWidget):
         self.page_jogo.setGeometry(0, 0, 150, 150)
         self.page_jogo.hide()
 
-        # Timer da página 2: apenas visual, não captura cliques nem impede o arrasto.
         self.timer_jogo_label = OutlineLabel("", self.page_jogo)
         self.timer_jogo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.timer_jogo_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
@@ -656,7 +671,6 @@ class WidgetFrutigerAero(QWidget):
         self.btn_clique_jogo2.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_clique_jogo2.clicked.connect(lambda: self.abrir_link_jogo(1))
 
-        # ================= PAINEL SUPERIOR =================
         self.top_panel = QWidget(self)
         self.top_panel.setGeometry(24, 0, 150, self.top_extra)
         top_layout = QHBoxLayout(self.top_panel)
@@ -695,7 +709,6 @@ class WidgetFrutigerAero(QWidget):
         self.top_panel.hide()
         self.linha_top.hide()
 
-        # ================= NAVEGAÇÃO =================
         self.btn_nav_esq = QPushButton("<", self)
         self.btn_nav_esq.setGeometry(0, 89, 24, 24)
         self.btn_nav_esq.clicked.connect(lambda: self.mudar_pagina("esq"))
@@ -709,11 +722,9 @@ class WidgetFrutigerAero(QWidget):
         self.timer_hover.timeout.connect(self.verificar_hover_bordas)
         self.timer_hover.start(100)
 
-        # ================= INICIALIZAÇÃO =================
         self.janela_calendario = JanelaCalendario(self)
         self.calendario_aberto = False
 
-        # Fecha o mini calendário após 10 segundos sem interação.
         self.timer_calendario_autoclose = QTimer(self)
         self.timer_calendario_autoclose.setSingleShot(True)
         self.timer_calendario_autoclose.timeout.connect(self.fechar_calendario_por_inatividade)
@@ -742,7 +753,6 @@ class WidgetFrutigerAero(QWidget):
         QTimer.singleShot(100, self.baixar_todos_dados)
         self.posicionar_elementos()
 
-    # ----------------------------------------------------
     def aplicar_sempre_no_topo(self):
         flags = self.windowFlags()
         if config_app.sempre_no_topo: flags |= Qt.WindowType.WindowStaysOnTopHint
@@ -803,19 +813,57 @@ class WidgetFrutigerAero(QWidget):
                 raio_desfoque(config_app.desfoque), borda_cor=self.borda_cor, esp_borda=self.esp_borda, modo_claro=config_app.modo_claro
             )
 
+    def verificar_atualizacoes(self, manual=False):
+        if not getattr(sys, "frozen", False):
+            if manual:
+                QMessageBox.information(self, "Atualizações", f"Versão atual: {APP_VERSION}\n\nO atualizador automático funciona somente no .exe compilado.")
+            return
+        try:
+            req = urllib.request.Request(URL_UPDATE_CHECK, headers={"User-Agent": "MussasWidget-Updater"})
+            with urllib.request.urlopen(req, timeout=10) as resposta:
+                dados = json.loads(resposta.read().decode("utf-8"))
+            versao_remota = str(dados.get("version", "")).strip()
+            url_download = str(dados.get("download_url", dados.get("url", URL_DOWNLOAD_EXE))).strip()
+            if not versao_remota or not url_download:
+                raise ValueError("version.json não contém version/download_url válidos.")
+            if versao_tuple(versao_remota) <= versao_tuple(APP_VERSION):
+                if manual:
+                    QMessageBox.information(self, "Atualizações", f"Você já está usando a versão mais recente.\n\nVersão atual: {APP_VERSION}")
+                return
+            resposta = QMessageBox.question(self, "Atualização disponível", f"Uma nova versão do MussasWidget está disponível.\n\nAtual: {APP_VERSION}\nNova: {versao_remota}\n\nDeseja baixar e instalar agora?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.Yes)
+            if resposta != QMessageBox.StandardButton.Yes:
+                return
+            temp_dir = tempfile.gettempdir()
+            novo_exe = os.path.join(temp_dir, f"MussasWidget_new_{os.getpid()}.exe")
+            req_download = urllib.request.Request(url_download, headers={"User-Agent": "MussasWidget-Updater"})
+            with urllib.request.urlopen(req_download, timeout=120) as resposta_download:
+                with open(novo_exe, "wb") as arquivo:
+                    while True:
+                        bloco = resposta_download.read(1024 * 1024)
+                        if not bloco:
+                            break
+                        arquivo.write(bloco)
+            if not os.path.exists(novo_exe) or os.path.getsize(novo_exe) < 100000:
+                try: os.remove(novo_exe)
+                except OSError: pass
+                raise RuntimeError("O arquivo baixado parece estar incompleto.")
+            executar_atualizacao_bat(novo_exe)
+            QApplication.quit()
+        except Exception as e:
+            if manual:
+                QMessageBox.critical(self, "Erro ao atualizar", "Não foi possível verificar/instalar a atualização.\n\nDetalhes: " + str(e))
+
     def fechar_painel_topo(self):
         if self.top_expanded: self.toggle_top_panel()
 
     def verificar_hover_bordas(self):
         pos = self.mapFromGlobal(QCursor.pos())
         y_min = 26 if self.top_expanded else 26
-        # Botões de nav
         if 0 <= pos.x() <= 24 and y_min <= pos.y() <= self.height(): self.btn_nav_esq.show()
         else: self.btn_nav_esq.hide()
         if 174 <= pos.x() <= 198 and y_min <= pos.y() <= self.height(): self.btn_nav_dir.show()
         else: self.btn_nav_dir.hide()
         
-        # Area superior do painel
         if self.top_expanded and 24 <= pos.x() <= 174 and 0 <= pos.y() <= self.top_extra:
             self.timer_autoclose.start(10000)
 
@@ -869,7 +917,6 @@ class WidgetFrutigerAero(QWidget):
 
     def mousePressEvent(self, event):
         pos_y = event.position().y()
-        # Area visível para clicar no topo e abrir/fechar (os 26px originais equivalem ao y de 26 a 50)
         if 26 <= pos_y < 50:
             self.toggle_top_panel()
             return
@@ -893,7 +940,7 @@ class WidgetFrutigerAero(QWidget):
         config_app.pos_x = self.x()
         config_app.pos_y = self.y()
         config_app.salvar()
-        if config_app.segundo_plano and not self.atualizando:
+        if config_app.segundo_plano:
             event.ignore()
             self.hide()
             if self.calendario_aberto: self.janela_calendario.hide()
@@ -935,9 +982,6 @@ class WidgetFrutigerAero(QWidget):
         try:
             req_jogo = urllib.request.urlopen(URL_CSV_JOGO)
             csv_jogo = list(csv.reader(codecs.iterdecode(req_jogo, 'utf-8')))
-
-            # C2 = coluna C (índice 2) e D2 = coluna D (índice 3).
-            # A linha 2 do CSV corresponde ao índice 1.
             if len(csv_jogo) > 1:
                 linha2 = csv_jogo[1]
                 if len(linha2) >= 1: self.dados_jogo[0]["imagem"] = linha2[0].strip()
@@ -945,7 +989,6 @@ class WidgetFrutigerAero(QWidget):
                 if len(linha2) >= 4:
                     self.data_inicio_jogo = self.parse_data_jogo(linha2[2].strip())
                     self.data_fim_jogo = self.parse_data_jogo(linha2[3].strip())
-
             if len(csv_jogo) > 2:
                 linha3 = csv_jogo[2]
                 if len(linha3) >= 1: self.dados_jogo[1]["imagem"] = linha3[0].strip()
@@ -983,7 +1026,6 @@ class WidgetFrutigerAero(QWidget):
             return
 
         agora = datetime.now()
-
         if self.data_inicio_jogo and agora < self.data_inicio_jogo:
             restante = self.data_inicio_jogo - agora
             texto = "Começa em " + self.formatar_tempo_jogo(restante)
@@ -1041,34 +1083,25 @@ class WidgetFrutigerAero(QWidget):
     def iniciar_animacao_parabens(self):
         if self.aniversario_animacao_executada:
             return
-
         self.aniversario_animacao_executada = True
-
-        # Posições finais normais dos dois textos.
         pos_nome_final = QPoint(10, 16)
         pos_data_final = QPoint(10, 36)
-
-        # Começam abaixo do cartão e sobem até a posição definitiva.
         pos_nome_inicial = QPoint(10, 66)
         pos_data_inicial = QPoint(10, 86)
-
         self.nome_label.move(pos_nome_inicial)
         self.data_label.move(pos_data_inicial)
         self.nome_label.show()
         self.data_label.show()
-
         anim_nome = QPropertyAnimation(self.nome_label, b"pos", self)
         anim_nome.setDuration(700)
         anim_nome.setStartValue(pos_nome_inicial)
         anim_nome.setEndValue(pos_nome_final)
         anim_nome.setEasingCurve(QEasingCurve.Type.OutCubic)
-
         anim_data = QPropertyAnimation(self.data_label, b"pos", self)
         anim_data.setDuration(700)
         anim_data.setStartValue(pos_data_inicial)
         anim_data.setEndValue(pos_data_final)
         anim_data.setEasingCurve(QEasingCurve.Type.OutCubic)
-
         self.animacao_parabens = QParallelAnimationGroup(self)
         self.animacao_parabens.addAnimation(anim_nome)
         self.animacao_parabens.addAnimation(anim_data)
@@ -1078,7 +1111,6 @@ class WidgetFrutigerAero(QWidget):
         if not self.dados_planilha: return
         hoje = date.today()
         proximo_aniv, menor_diferenca = None, 99999
-
         for item in self.dados_planilha:
             try:
                 nome, data_str = item[0], item[1]
@@ -1103,7 +1135,6 @@ class WidgetFrutigerAero(QWidget):
                 self.data_label.atualizar_estilo(aplicar_css_fonte_base("parabens_nome"), "#d90f0f", self.borda_cor, self.esp_borda)
                 self.faltam_label.setText("")
                 self.dias_label.setText("🤤")
-
                 if self.aniversario_animacao_pronta and not self.aniversario_animacao_executada:
                     self.iniciar_animacao_parabens()
                 elif not self.aniversario_animacao_pronta:
@@ -1114,7 +1145,6 @@ class WidgetFrutigerAero(QWidget):
                     self.data_label.move(10, 36)
                     self.nome_label.show()
                     self.data_label.show()
-
                 if not self.ja_tocou_hoje():
                     self.player.play()
                     self.marcar_como_tocado()
@@ -1151,7 +1181,6 @@ class WidgetFrutigerAero(QWidget):
         self.pulse_size += self.pulse_dir
         if self.pulse_size >= 24: self.pulse_dir = -1
         elif self.pulse_size <= 14: self.pulse_dir = 1
-        
         css = aplicar_css_fonte_base("dias")
         css = css.replace(f"font-size: {CONFIG_FONTES['dias']['tamanho']}px", f"font-size: {self.pulse_size}px")
         self.dias_label.atualizar_estilo(css, self.cor_texto, self.borda_cor, self.esp_borda)
@@ -1180,177 +1209,6 @@ class WidgetFrutigerAero(QWidget):
         self.fixado = not self.fixado
         self.btn_pin.setText("📌" if self.fixado else "🔓")
 
-    def normalizar_versao(self, valor):
-        """Converte versões como v1.3.1 ou 1.3.1 em uma tupla comparável."""
-        texto = str(valor or "").strip().lower()
-        if texto.startswith("v"):
-            texto = texto[1:]
-        numeros = []
-        for parte in texto.split("."):
-            numero = ""
-            for caractere in parte:
-                if caractere.isdigit():
-                    numero += caractere
-                else:
-                    break
-            numeros.append(int(numero or 0))
-        while len(numeros) < 4:
-            numeros.append(0)
-        return tuple(numeros[:4])
-
-    def verificar_atualizacoes(self, manual=False):
-        """Consulta version.json no GitHub e inicia a atualização quando houver versão nova."""
-        if not getattr(sys, "frozen", False):
-            if manual:
-                QMessageBox.information(
-                    self, "Atualizações",
-                    "O atualizador automático só funciona no MussasWidget.exe compilado."
-                )
-            return
-
-        try:
-            req = urllib.request.Request(
-                URL_UPDATE_CHECK,
-                headers={"User-Agent": "MussasWidget-Updater"}
-            )
-            with urllib.request.urlopen(req, timeout=10) as resposta:
-                dados = json.loads(resposta.read().decode("utf-8"))
-
-            versao_remota = str(dados.get("version", "")).strip()
-            url_download = str(dados.get("download_url", "")).strip()
-            if not versao_remota or not url_download:
-                raise ValueError("version.json não contém version ou download_url.")
-
-            if not url_download.lower().startswith((
-                "https://github.com/",
-                "https://objects.githubusercontent.com/"
-            )):
-                raise ValueError("A URL de atualização não é um endereço HTTPS válido do GitHub.")
-
-            if self.normalizar_versao(versao_remota) <= self.normalizar_versao(APP_VERSION):
-                if manual:
-                    QMessageBox.information(
-                        self, "Atualizações",
-                        f"Você já está usando a versão mais recente ({APP_VERSION})."
-                    )
-                return
-
-            resposta = QMessageBox.question(
-                self,
-                "Atualização disponível",
-                f"Uma nova versão do MussasWidget está disponível.\n\n"
-                f"Atual: {APP_VERSION}\nNova: {versao_remota}\n\n"
-                "Deseja baixar e instalar agora?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.Yes
-            )
-            if resposta == QMessageBox.StandardButton.Yes:
-                self._baixar_e_instalar_atualizacao(url_download, versao_remota)
-
-        except Exception as e:
-            if manual:
-                QMessageBox.warning(
-                    self, "Erro ao verificar atualizações",
-                    f"Não foi possível verificar a atualização.\n\n{e}"
-                )
-
-    def _baixar_e_instalar_atualizacao(self, url_download, versao_remota):
-        """Baixa o novo EXE e usa um BAT temporário para substituir o EXE em execução."""
-        try:
-            exe_atual = os.path.abspath(sys.executable)
-            pasta_exe = os.path.dirname(exe_atual)
-
-            # O novo EXE fica no mesmo diretório do atual para que o BAT possa
-            # fazer a troca sem depender de permissões extras do TEMP.
-            fd, novo_exe = tempfile.mkstemp(
-                prefix="MussasWidget_update_", suffix=".exe", dir=pasta_exe
-            )
-            os.close(fd)
-
-            try:
-                req = urllib.request.Request(
-                    url_download,
-                    headers={"User-Agent": "MussasWidget-Updater"}
-                )
-                with urllib.request.urlopen(req, timeout=120) as resposta, open(novo_exe, "wb") as arquivo:
-                    while True:
-                        bloco = resposta.read(1024 * 1024)
-                        if not bloco:
-                            break
-                        arquivo.write(bloco)
-            except Exception:
-                try:
-                    os.remove(novo_exe)
-                except OSError:
-                    pass
-                raise
-
-            fd, bat_path = tempfile.mkstemp(
-                prefix="MussasWidget_updater_", suffix=".bat", dir=tempfile.gettempdir()
-            )
-            os.close(fd)
-
-            pid = os.getpid()
-            exe_alvo = exe_atual.replace("%", "%%")
-            novo_alvo = novo_exe.replace("%", "%%")
-            bat_alvo = bat_path.replace("%", "%%")
-
-            conteudo_bat = f'''@echo off
-setlocal
-set "PID={pid}"
-set "OLD={exe_alvo}"
-set "NEW={novo_alvo}"
-set "BAT={bat_alvo}"
-
-:WAIT
-tasklist /FI "PID eq %PID%" 2>NUL | findstr /R /C:" %PID% " >NUL
-if not errorlevel 1 (
-    timeout /t 1 /nobreak >NUL
-    goto WAIT
-)
-
-if not exist "%NEW%" goto CLEANUP
-
-:REPLACE
-move /Y "%NEW%" "%OLD%" >NUL 2>&1
-if exist "%OLD%" goto START
-timeout /t 1 /nobreak >NUL
-goto REPLACE
-
-:START
-start "" "%OLD%"
-
-:CLEANUP
-timeout /t 1 /nobreak >NUL
-del /F /Q "%BAT%" >NUL 2>&1
-exit /B
-'''
-
-            with open(bat_path, "w", encoding="mbcs") as arquivo:
-                arquivo.write(conteudo_bat)
-
-            subprocess.Popen(
-                ["cmd.exe", "/c", bat_path],
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                close_fds=True
-            )
-
-            QMessageBox.information(
-                self,
-                "Atualização pronta",
-                f"A versão {versao_remota} foi baixada.\n\n"
-                "O MussasWidget será fechado e atualizado automaticamente."
-            )
-            self.atualizando = True
-            QApplication.quit()
-
-        except Exception as e:
-            QMessageBox.warning(
-                self,
-                "Erro na atualização",
-                f"Não foi possível baixar a nova versão.\n\n{e}"
-            )
-
     def fechar_app(self):
         self.timer_calendario_autoclose.stop()
         if config_app.segundo_plano:
@@ -1361,9 +1219,9 @@ exit /B
 
     def configurar_bandeja(self, pix):
         self.tray_icon = QSystemTrayIcon(self)
-        tray_pix = QIcon(resource_path("calendar.png"))
+        tray_pix = QIcon(external_resource_path("calendar.png"))
         if tray_pix.isNull():
-            tray_pix = QIcon(resource_path("icone.ico"))
+            tray_pix = QIcon(external_resource_path("icone.ico"))
         self.tray_icon.setIcon(tray_pix)
         tray_menu = QMenu()
         acao_abrir = QAction("Abrir", self)
