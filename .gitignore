@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# PyInstaller
+build/
+dist/
+*.spec
+
+# Arquivos de configuração/estado local
+config.json
+parabens_played.txt
+
+# Ambiente virtual
+venv/
+.venv/
+env/
+
+# Arquivos temporários
+*.tmp
+*.log
+
+# VS Code
+.vscode/
