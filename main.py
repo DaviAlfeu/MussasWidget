@@ -10,6 +10,7 @@ import webbrowser
 import random
 import tempfile
 import subprocess
+import time
 from datetime import date, datetime
 
 from PyQt6.QtWidgets import (
@@ -115,46 +116,43 @@ def caminho_executavel_atual():
 
 def executar_atualizacao_bat(novo_exe):
     exe_atual = caminho_executavel_atual()
-    temp_dir = tempfile.gettempdir()
-    bat_path = os.path.join(temp_dir, f"MussasWidget_update_{os.getpid()}.bat")
+    nome_atual = os.path.basename(exe_atual)
+    caminho_old = exe_atual + ".old"
     
-    conteudo = (
-        "@echo off\r\n"
-        "setlocal\r\n"
-        f'set "APP={exe_atual}"\r\n'
-        f'set "NEW={novo_exe}"\r\n'
-        f'set "PID={os.getpid()}"\r\n'
-        ":WAIT\r\n"
-        'tasklist /FI "PID eq %PID%" 2>NUL | find "%PID%" >NUL\r\n'
-        "if not errorlevel 1 (\r\n"
-        " timeout /t 1 /nobreak >NUL\r\n"
-        " goto WAIT\r\n"
-        ")\r\n"
-        "timeout /t 1 /nobreak >NUL\r\n"
-        'if not exist "%NEW%" (\r\n'
-        ' del /q "%NEW%" >NUL 2>&1\r\n'
-        ' del "%~f0" >NUL 2>&1\r\n'
-        " exit /b 1\r\n"
-        ")\r\n"
-        'move /Y "%NEW%" "%APP%" >NUL 2>&1\r\n'
-        "if errorlevel 1 (\r\n"
-        ' copy /Y "%NEW%" "%APP%" >NUL 2>&1\r\n'
-        " if errorlevel 1 (\r\n"
-        '  del /q "%NEW%" >NUL 2>&1\r\n'
-        '  del "%~f0" >NUL 2>&1\r\n'
-        "  exit /b 1\r\n"
-        " )\r\n"
-        ' del /q "%NEW%" >NUL 2>&1\r\n'
-        ")\r\n"
-        'start "" "%APP%"\r\n'
-        'del "%~f0" >NUL 2>&1\r\n'
-    )
+    bat_path = os.path.join(tempfile.gettempdir(), f"mussas_update_{os.getpid()}.bat")
     
-    with open(bat_path, "w", encoding="utf-8", newline="") as f:
+    conteudo = f"""@echo off
+:: Espera 2 segundos para o processo atual morrer completamente
+ping 127.0.0.1 -n 3 > NUL
+
+:: Garante que o processo seja finalizado à força
+taskkill /F /PID {os.getpid()} > NUL 2>&1
+ping 127.0.0.1 -n 2 > NUL
+
+:: Remove a versão de backup antiga, se existir
+del /q "{caminho_old}" > NUL 2>&1
+
+:: Renomeia o executável atual para .old (O Windows permite isso mesmo rodando)
+move /Y "{exe_atual}" "{caminho_old}" > NUL 2>&1
+
+:: Move o novo executável baixado para o nome original
+move /Y "{novo_exe}" "{exe_atual}" > NUL 2>&1
+
+:: Desbloqueia o arquivo para evitar o aviso do Windows Defender (SmartScreen)
+powershell -windowstyle hidden -Command "Unblock-File -LiteralPath '{exe_atual}'" > NUL 2>&1
+
+:: Inicia o app atualizado
+start "" "{exe_atual}"
+
+:: Deleta a si mesmo
+del "%~f0" > NUL 2>&1
+"""
+    with open(bat_path, "w", encoding="utf-8", newline="\r\n") as f:
         f.write(conteudo)
         
-    flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
-    subprocess.Popen(["cmd.exe", "/c", bat_path], creationflags=flags, close_fds=True)
+    # Executa o bat sem criar a janela preta
+    CREATE_NO_WINDOW = 0x08000000
+    subprocess.Popen([bat_path], creationflags=CREATE_NO_WINDOW)
 
 class Configuracoes:
     def __init__(self):
@@ -821,40 +819,58 @@ class WidgetFrutigerAero(QWidget):
             if manual:
                 QMessageBox.information(self, "Atualizações", f"Versão atual: {APP_VERSION}\n\nO atualizador automático funciona somente no .exe compilado.")
             return
+            
         try:
-            req = urllib.request.Request(URL_UPDATE_CHECK, headers={"User-Agent": "MussasWidget-Updater"})
+            req = urllib.request.Request(URL_UPDATE_CHECK, headers={"User-Agent": "Mozilla/5.0"})
             with urllib.request.urlopen(req, timeout=10) as resposta:
                 dados = json.loads(resposta.read().decode("utf-8"))
+                
             versao_remota = str(dados.get("version", "")).strip()
             url_download = str(dados.get("download_url", dados.get("url", URL_DOWNLOAD_EXE))).strip()
+            
             if not versao_remota or not url_download:
-                raise ValueError("version.json não contém version/download_url válidos.")
+                raise ValueError("JSON de versão inválido no GitHub.")
+                
             if versao_tuple(versao_remota) <= versao_tuple(APP_VERSION):
                 if manual:
                     QMessageBox.information(self, "Atualizações", f"Você já está usando a versão mais recente.\n\nVersão atual: {APP_VERSION}")
                 return
-            resposta = QMessageBox.question(self, "Atualização disponível", f"Uma nova versão do MussasWidget está disponível.\n\nAtual: {APP_VERSION}\nNova: {versao_remota}\n\nDeseja baixar e instalar agora?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.Yes)
-            if resposta != QMessageBox.StandardButton.Yes:
+                
+            resposta_msg = QMessageBox.question(self, "Atualização disponível", f"Uma nova versão está disponível!\n\nAtual: {APP_VERSION}\nNova: {versao_remota}\n\nDeseja baixar e instalar agora?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.Yes)
+            
+            if resposta_msg != QMessageBox.StandardButton.Yes:
                 return
+                
+            # Mostra cursor de carregamento pois o download congela a tela por uns segundos
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            
             temp_dir = tempfile.gettempdir()
             novo_exe = os.path.join(temp_dir, f"MussasWidget_new_{os.getpid()}.exe")
-            req_download = urllib.request.Request(url_download, headers={"User-Agent": "MussasWidget-Updater"})
+            req_download = urllib.request.Request(url_download, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+            
             with urllib.request.urlopen(req_download, timeout=120) as resposta_download:
                 with open(novo_exe, "wb") as arquivo:
-                    while True:
-                        bloco = resposta_download.read(1024 * 1024)
-                        if not bloco:
-                            break
-                        arquivo.write(bloco)
+                    arquivo.write(resposta_download.read())
+                    
             if not os.path.exists(novo_exe) or os.path.getsize(novo_exe) < 100000:
                 try: os.remove(novo_exe)
-                except OSError: pass
-                raise RuntimeError("O arquivo baixado parece estar incompleto.")
+                except: pass
+                raise RuntimeError("O arquivo baixado parece estar incompleto ou corrompido.")
+                
+            QApplication.restoreOverrideCursor()
+            
+            # Confirmação visual para você saber que o download realmente funcionou
+            QMessageBox.information(self, "Download Concluído", "A atualização foi baixada com sucesso!\n\nO aplicativo será reiniciado agora.")
+            
             executar_atualizacao_bat(novo_exe)
-            QApplication.quit()
+            
+            # Fecha IMEDIATAMENTE (sem esperar a fila de eventos do PyQt) liberando o processo pro BAT
+            os._exit(0)
+            
         except Exception as e:
+            QApplication.restoreOverrideCursor()
             if manual:
-                QMessageBox.critical(self, "Erro ao atualizar", "Não foi possível verificar/instalar a atualização.\n\nDetalhes: " + str(e))
+                QMessageBox.critical(self, "Erro ao atualizar", "Não foi possível verificar ou instalar a atualização.\n\nDetalhes: " + str(e))
 
     def fechar_painel_topo(self):
         if self.top_expanded: self.toggle_top_panel()
