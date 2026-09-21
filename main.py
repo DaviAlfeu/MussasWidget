@@ -20,7 +20,7 @@ from PyQt6.QtWidgets import (
     QStackedWidget, QScrollArea, QComboBox, QSlider, QMessageBox
 )
 from PyQt6.QtCore import (
-    Qt, QTimer, QUrl, QPoint, pyqtSignal,
+    QThread, Qt, QTimer, QUrl, QPoint, pyqtSignal,
     QPropertyAnimation, QParallelAnimationGroup, QEasingCurve, QAbstractAnimation, QEvent, QSharedMemory
 )
 from PyQt6.QtGui import (
@@ -29,7 +29,7 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
 
-APP_VERSION = "1.0.1"
+APP_VERSION = "1.0.2"
 URL_UPDATE_CHECK = "https://raw.githubusercontent.com/DaviAlfeu/MussasWidget/main/version.json"
 URL_DOWNLOAD_EXE = "https://github.com/DaviAlfeu/MussasWidget/raw/main/WidgetAniversarios.exe"
 URL_CSV_ANIVERSARIOS = "https://docs.google.com/spreadsheets/d/1W1cX9dCAFnLPjDImSB6rjSSC0GhvOX0rp_HiaHeHAGI/export?format=csv&gid=0"
@@ -48,8 +48,82 @@ CONFIG_FONTES = {
     "cal_lista": {"fonte": "Lemon Milk", "tamanho": 11, "peso": "bold"}
 }
 
-STATE_FILE = "parabens_played.txt"
-CONFIG_FILE = "config.json"
+APPDATA_DIR = os.path.join(os.getenv('APPDATA', os.path.expanduser('~')), "MussasWidget")
+os.makedirs(APPDATA_DIR, exist_ok=True)
+
+PASTA_WALLPAPERS = os.path.join(APPDATA_DIR, "Wallpapers")
+os.makedirs(PASTA_WALLPAPERS, exist_ok=True)
+
+STATE_FILE = os.path.join(APPDATA_DIR, "parabens_played.txt")
+CONFIG_FILE = os.path.join(APPDATA_DIR, "config.json")
+
+# --- FUNÇÃO E CLASSE DE THREAD PARA EVITAR TRAVAMENTOS ---
+def parse_data_jogo_bg(valor):
+    if not valor: return None
+    valor = valor.strip()
+    formatos = (
+        "%d/%m/%Y %H:%M:%S", "%d/%m/%Y %H:%M", "%d/%m/%Y",
+        "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d",
+        "%d/%m/%y %H:%M:%S", "%d/%m/%y %H:%M", "%d/%m/%y"
+    )
+    for formato in formatos:
+        try: return datetime.strptime(valor, formato)
+        except ValueError: pass
+    try: return datetime.fromisoformat(valor.replace("Z", "+00:00")).replace(tzinfo=None)
+    except Exception: return None
+
+class WorkerDownload(QThread):
+    resultado = pyqtSignal(list, list, object, object, bytes, bytes)
+
+    def run(self):
+        dados_planilha = []
+        dados_jogo = [{"imagem": "", "link": ""}, {"imagem": "", "link": ""}]
+        data_inicio = None
+        data_fim = None
+        img_bytes1 = b""
+        img_bytes2 = b""
+
+        # 1. Baixar Aniversários em 2º plano
+        try:
+            req_aniv = urllib.request.urlopen(URL_CSV_ANIVERSARIOS, timeout=10)
+            csv_aniv = csv.reader(codecs.iterdecode(req_aniv, 'utf-8'))
+            next(csv_aniv, None)
+            for r in csv_aniv:
+                if len(r) >= 2 and r[0].strip():
+                    dados_planilha.append((r[0].strip(), r[1].strip(), r[2].strip() if len(r) >= 3 else ""))
+        except: pass
+
+        # 2. Baixar Dados do Jogo em 2º plano
+        try:
+            req_jogo = urllib.request.urlopen(URL_CSV_JOGO, timeout=10)
+            csv_jogo = list(csv.reader(codecs.iterdecode(req_jogo, 'utf-8')))
+            if len(csv_jogo) > 1:
+                linha2 = csv_jogo[1]
+                if len(linha2) >= 1: dados_jogo[0]["imagem"] = linha2[0].strip()
+                if len(linha2) >= 2: dados_jogo[0]["link"] = linha2[1].strip()
+                if len(linha2) >= 4:
+                    data_inicio = parse_data_jogo_bg(linha2[2].strip())
+                    data_fim = parse_data_jogo_bg(linha2[3].strip())
+            if len(csv_jogo) > 2:
+                linha3 = csv_jogo[2]
+                if len(linha3) >= 1: dados_jogo[1]["imagem"] = linha3[0].strip()
+                if len(linha3) >= 2: dados_jogo[1]["link"] = linha3[1].strip()
+        except: pass
+
+        # 3. Baixar as imagens remotamente sem travar a interface
+        try:
+            if dados_jogo[0]["imagem"]:
+                req = urllib.request.Request(dados_jogo[0]["imagem"], headers={'User-Agent': 'Mozilla/5.0'})
+                img_bytes1 = urllib.request.urlopen(req, timeout=10).read()
+        except: pass
+        try:
+            if dados_jogo[1]["imagem"]:
+                req = urllib.request.Request(dados_jogo[1]["imagem"], headers={'User-Agent': 'Mozilla/5.0'})
+                img_bytes2 = urllib.request.urlopen(req, timeout=10).read()
+        except: pass
+
+        # Envia os resultados prontos de volta para a interface principal
+        self.resultado.emit(dados_planilha, dados_jogo, data_inicio, data_fim, img_bytes1, img_bytes2)
 
 NIVEIS_DESFOQUE = [0, 20, 40, 60, 80, 100]
 NIVEIS_ESPESSURA = [0.0, 0.5, 1.0, 1.5, 2.0]
@@ -338,13 +412,21 @@ class JanelaConfiguracoes(QDialog):
         self.check_topo = QCheckBox("Sempre no topo")
         self.check_topo.setChecked(config_app.sempre_no_topo)
 
-        lbl_wp = QLabel("Papel de Parede (Pasta: Wallpapers/):")
+        # Layout horizontal para o rótulo e o botão de abrir a pasta no AppData
+        layout_wp_top = QHBoxLayout()
+        lbl_wp = QLabel("Papel de Parede:")
+        self.btn_abrir_wp = QPushButton("📂 Abrir Pasta")
+        self.btn_abrir_wp.setStyleSheet("padding: 3px 6px;")
+        self.btn_abrir_wp.clicked.connect(lambda: os.startfile(PASTA_WALLPAPERS))
+        
+        layout_wp_top.addWidget(lbl_wp)
+        layout_wp_top.addStretch()
+        layout_wp_top.addWidget(self.btn_abrir_wp)
+
         self.combo_wp = QComboBox()
         self.combo_wp.addItem("Nenhum")
         
-        self.pasta_wallpapers = os.path.join(os.path.dirname(get_app_path()), "Wallpapers")
-        os.makedirs(self.pasta_wallpapers, exist_ok=True)
-        for f in os.listdir(self.pasta_wallpapers):
+        for f in os.listdir(PASTA_WALLPAPERS):
             if f.lower().endswith(('.png', '.jpg', '.jpeg')):
                 self.combo_wp.addItem(f)
                 
@@ -375,7 +457,7 @@ class JanelaConfiguracoes(QDialog):
         layout.addWidget(self.check_plano)
         layout.addWidget(self.check_topo)
         layout.addSpacing(10)
-        layout.addWidget(lbl_wp)
+        layout.addLayout(layout_wp_top)
         layout.addWidget(self.combo_wp)
         layout.addWidget(self.lbl_blur)
         layout.addWidget(self.slider_blur)
@@ -764,7 +846,7 @@ class WidgetFrutigerAero(QWidget):
     def aplicar_tema(self):
         wp_path = "Nenhum"
         if config_app.wallpaper != "Nenhum":
-            caminho_wp = os.path.join(os.path.dirname(get_app_path()), "Wallpapers", config_app.wallpaper)
+            caminho_wp = os.path.join(PASTA_WALLPAPERS, config_app.wallpaper)
             if os.path.exists(caminho_wp):
                 wp_path = caminho_wp
 
@@ -981,44 +1063,38 @@ class WidgetFrutigerAero(QWidget):
             self.timer_autoclose.stop()
 
     def baixar_todos_dados(self):
-        try:
-            req_aniv = urllib.request.urlopen(URL_CSV_ANIVERSARIOS)
-            csv_aniv = csv.reader(codecs.iterdecode(req_aniv, 'utf-8'))
-            next(csv_aniv, None)
-            self.dados_planilha = []
-            for r in csv_aniv:
-                if len(r) < 2 or not r[0].strip():
-                    continue
-                nome = r[0].strip()
-                data_str = r[1].strip()
-                cor_nome = normalizar_cor_hex(r[2].strip() if len(r) >= 3 else "")
-                self.dados_planilha.append((nome, data_str, cor_nome))
-        except: pass
+        # Evita iniciar uma nova thread se já houver uma ativa
+        if hasattr(self, 'worker') and self.worker.isRunning():
+            return 
+        
+        self.worker = WorkerDownload()
+        self.worker.resultado.connect(self.processar_dados_baixados)
+        self.worker.start()
 
-        self.dados_jogo = [{"imagem": "", "link": ""}, {"imagem": "", "link": ""}]
-        self.data_inicio_jogo = None
-        self.data_fim_jogo = None
-        try:
-            req_jogo = urllib.request.urlopen(URL_CSV_JOGO)
-            csv_jogo = list(csv.reader(codecs.iterdecode(req_jogo, 'utf-8')))
-            if len(csv_jogo) > 1:
-                linha2 = csv_jogo[1]
-                if len(linha2) >= 1: self.dados_jogo[0]["imagem"] = linha2[0].strip()
-                if len(linha2) >= 2: self.dados_jogo[0]["link"] = linha2[1].strip()
-                if len(linha2) >= 4:
-                    self.data_inicio_jogo = self.parse_data_jogo(linha2[2].strip())
-                    self.data_fim_jogo = self.parse_data_jogo(linha2[3].strip())
-            if len(csv_jogo) > 2:
-                linha3 = csv_jogo[2]
-                if len(linha3) >= 1: self.dados_jogo[1]["imagem"] = linha3[0].strip()
-                if len(linha3) >= 2: self.dados_jogo[1]["link"] = linha3[1].strip()
-        except: pass
+    def processar_dados_baixados(self, plan, jogo, data_ini, data_fim, img1, img2):
+        self.dados_planilha = plan
+        self.dados_jogo = jogo
+        self.data_inicio_jogo = data_ini
+        self.data_fim_jogo = data_fim
 
-        self.carregar_imagem_jogo()
+        self.carregar_imagem_bytes(img1, self.img_label_jogo1)
+        self.carregar_imagem_bytes(img2, self.img_label_jogo2)
+
         self.atualizar_interface_aniversario()
         
         if self.calendario_aberto:
             self.aplicar_tema()
+
+    def carregar_imagem_bytes(self, dados_bytes, label):
+        if not dados_bytes:
+            label.clear()
+            label.setText("...")
+            label.atualizar_estilo(aplicar_css_fonte_base("nome"), self.cor_texto, self.borda_cor, self.esp_borda)
+            return
+        
+        pix = QPixmap()
+        pix.loadFromData(dados_bytes)
+        label.setPixmap(pix.scaled(65, 65, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))        
 
     def parse_data_jogo(self, valor):
         if not valor:
