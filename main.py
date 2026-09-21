@@ -117,6 +117,7 @@ def executar_atualizacao_bat(novo_exe):
     exe_atual = caminho_executavel_atual()
     temp_dir = tempfile.gettempdir()
     bat_path = os.path.join(temp_dir, f"MussasWidget_update_{os.getpid()}.bat")
+    
     conteudo = (
         "@echo off\r\n"
         "setlocal\r\n"
@@ -130,26 +131,28 @@ def executar_atualizacao_bat(novo_exe):
         " goto WAIT\r\n"
         ")\r\n"
         "timeout /t 1 /nobreak >NUL\r\n"
-        "if not exist %NEW% (\r\n"
-        " del /q %NEW% >NUL 2>&1\r\n"
+        'if not exist "%NEW%" (\r\n'
+        ' del /q "%NEW%" >NUL 2>&1\r\n'
         ' del "%~f0" >NUL 2>&1\r\n'
         " exit /b 1\r\n"
         ")\r\n"
-        "move /Y %NEW% %APP% >NUL 2>&1\r\n"
+        'move /Y "%NEW%" "%APP%" >NUL 2>&1\r\n'
         "if errorlevel 1 (\r\n"
-        " copy /Y %NEW% %APP% >NUL 2>&1\r\n"
+        ' copy /Y "%NEW%" "%APP%" >NUL 2>&1\r\n'
         " if errorlevel 1 (\r\n"
-        "  del /q %NEW% >NUL 2>&1\r\n"
+        '  del /q "%NEW%" >NUL 2>&1\r\n'
         '  del "%~f0" >NUL 2>&1\r\n'
         "  exit /b 1\r\n"
         " )\r\n"
-        " del /q %NEW% >NUL 2>&1\r\n"
+        ' del /q "%NEW%" >NUL 2>&1\r\n'
         ")\r\n"
-        'start "" %APP%\r\n'
+        'start "" "%APP%"\r\n'
         'del "%~f0" >NUL 2>&1\r\n'
     )
+    
     with open(bat_path, "w", encoding="utf-8", newline="") as f:
         f.write(conteudo)
+        
     flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
     subprocess.Popen(["cmd.exe", "/c", bat_path], creationflags=flags, close_fds=True)
 
