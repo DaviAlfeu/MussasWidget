@@ -626,8 +626,10 @@ class WidgetFrutigerAero(QWidget):
             return
             
         try:
-            url_no_cache = f"{URL_UPDATE_CHECK}?t={int(time.time())}"
-            req = urllib.request.Request(url_no_cache, headers={"User-Agent": "Mozilla/5.0"})
+            req = urllib.request.Request(URL_UPDATE_CHECK, headers={
+                "User-Agent": "Mozilla/5.0",
+                "Accept": "application/vnd.github.v3.raw"
+            })
             with urllib.request.urlopen(req, timeout=10) as resposta:
                 dados = json.loads(resposta.read().decode("utf-8"))
                 
