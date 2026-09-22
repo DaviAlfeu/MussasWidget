@@ -3,7 +3,7 @@ import sys
 import json
 import winreg
 
-APP_VERSION = "1.1.1"
+APP_VERSION = "1.1.2"
 URL_UPDATE_CHECK = "https://raw.githubusercontent.com/DaviAlfeu/MussasWidget/main/version.json"
 URL_DOWNLOAD_EXE = "https://github.com/DaviAlfeu/MussasWidget/raw/main/WidgetAniversarios.exe"
 URL_CSV_ANIVERSARIOS = "https://docs.google.com/spreadsheets/d/1W1cX9dCAFnLPjDImSB6rjSSC0GhvOX0rp_HiaHeHAGI/export?format=csv&gid=0"
