@@ -11,17 +11,19 @@ import random
 import tempfile
 import subprocess
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QLabel, QFrame, QPushButton, 
     QHBoxLayout, QVBoxLayout, QGridLayout, QDialog, QCheckBox, 
     QSystemTrayIcon, QMenu, QGraphicsScene, QGraphicsBlurEffect,
-    QStackedWidget, QScrollArea, QComboBox, QSlider, QMessageBox
+    QStackedWidget, QScrollArea, QComboBox, QSlider, QMessageBox,
+    QFileDialog, QInputDialog, QFileIconProvider
 )
 from PyQt6.QtCore import (
     QThread, Qt, QTimer, QUrl, QPoint, pyqtSignal,
-    QPropertyAnimation, QParallelAnimationGroup, QEasingCurve, QAbstractAnimation, QEvent, QSharedMemory
+    QPropertyAnimation, QParallelAnimationGroup, QEasingCurve, QAbstractAnimation, QEvent, QSharedMemory,
+    QSize, QFileInfo
 )
 from PyQt6.QtGui import (
     QFontDatabase, QCursor, QPixmap, QIcon, QAction, 
@@ -57,7 +59,6 @@ os.makedirs(PASTA_WALLPAPERS, exist_ok=True)
 STATE_FILE = os.path.join(APPDATA_DIR, "parabens_played.txt")
 CONFIG_FILE = os.path.join(APPDATA_DIR, "config.json")
 
-# --- FUNÇÃO E CLASSE DE THREAD PARA EVITAR TRAVAMENTOS ---
 def parse_data_jogo_bg(valor):
     if not valor: return None
     valor = valor.strip()
@@ -83,7 +84,6 @@ class WorkerDownload(QThread):
         img_bytes1 = b""
         img_bytes2 = b""
 
-        # 1. Baixar Aniversários em 2º plano
         try:
             req_aniv = urllib.request.urlopen(URL_CSV_ANIVERSARIOS, timeout=10)
             csv_aniv = csv.reader(codecs.iterdecode(req_aniv, 'utf-8'))
@@ -93,7 +93,6 @@ class WorkerDownload(QThread):
                     dados_planilha.append((r[0].strip(), r[1].strip(), r[2].strip() if len(r) >= 3 else ""))
         except: pass
 
-        # 2. Baixar Dados do Jogo em 2º plano
         try:
             req_jogo = urllib.request.urlopen(URL_CSV_JOGO, timeout=10)
             csv_jogo = list(csv.reader(codecs.iterdecode(req_jogo, 'utf-8')))
@@ -110,7 +109,6 @@ class WorkerDownload(QThread):
                 if len(linha3) >= 2: dados_jogo[1]["link"] = linha3[1].strip()
         except: pass
 
-        # 3. Baixar as imagens remotamente sem travar a interface
         try:
             if dados_jogo[0]["imagem"]:
                 req = urllib.request.Request(dados_jogo[0]["imagem"], headers={'User-Agent': 'Mozilla/5.0'})
@@ -122,8 +120,38 @@ class WorkerDownload(QThread):
                 img_bytes2 = urllib.request.urlopen(req, timeout=10).read()
         except: pass
 
-        # Envia os resultados prontos de volta para a interface principal
         self.resultado.emit(dados_planilha, dados_jogo, data_inicio, data_fim, img_bytes1, img_bytes2)
+
+# ---- NOVA THREAD PARA MONITORIZAR PROCESSOS (TEMPO DE USO) ----
+class WorkerMonitorProcessos(QThread):
+    processos_atualizados = pyqtSignal(set)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._executando = True
+
+    def parar(self):
+        self._executando = False
+
+    def run(self):
+        CREATE_NO_WINDOW = 0x08000000
+        while self._executando:
+            inicio = time.monotonic()
+            try:
+                out = subprocess.check_output(
+                    ['tasklist', '/FO', 'CSV', '/NH'],
+                    creationflags=CREATE_NO_WINDOW,
+                    text=True
+                )
+                nomes = set(
+                    line.split(',')[0].strip('"').lower()
+                    for line in out.splitlines() if line
+                )
+                self.processos_atualizados.emit(nomes)
+            except Exception:
+                pass
+
+            time.sleep(max(0.05, 0.50 - (time.monotonic() - inicio)))
 
 NIVEIS_DESFOQUE = [0, 20, 40, 60, 80, 100]
 NIVEIS_ESPESSURA = [0.0, 0.5, 1.0, 1.5, 2.0]
@@ -138,6 +166,12 @@ def raio_desfoque(valor):
     except (TypeError, ValueError): valor = 0
     valor = max(0.0, min(100.0, valor))
     return int(round(valor * 50 / 100))
+
+def alpha_desfoque(valor, alpha_min=30, alpha_max=225):
+    try: valor = float(valor)
+    except (TypeError, ValueError): valor = 0
+    valor = max(0.0, min(100.0, valor))
+    return alpha_min + int(round(valor * (alpha_max - alpha_min) / 100))
 
 def indice_espessura(valor):
     try: valor = float(valor)
@@ -180,51 +214,29 @@ def carregar_fontes():
                     QFontDatabase.addApplicationFont(os.path.abspath(os.path.join(pasta, arquivo)))
 
 def versao_tuple(valor):
-    try:
-        return tuple(int(p) for p in str(valor).strip().lstrip("vV").split(".")[:4])
-    except Exception:
-        return (0,)
+    try: return tuple(int(p) for p in str(valor).strip().lstrip("vV").split(".")[:4])
+    except Exception: return (0,)
 
 def caminho_executavel_atual():
     return os.path.abspath(sys.executable) if getattr(sys, "frozen", False) else os.path.abspath(__file__)
 
 def executar_atualizacao_bat(novo_exe):
     exe_atual = caminho_executavel_atual()
-    nome_atual = os.path.basename(exe_atual)
     caminho_old = exe_atual + ".old"
-    
     bat_path = os.path.join(tempfile.gettempdir(), f"mussas_update_{os.getpid()}.bat")
-    
     conteudo = f"""@echo off
-:: Espera 2 segundos para o processo atual morrer completamente
 ping 127.0.0.1 -n 3 > NUL
-
-:: Garante que o processo seja finalizado à força
 taskkill /F /PID {os.getpid()} > NUL 2>&1
 ping 127.0.0.1 -n 2 > NUL
-
-:: Remove a versão de backup antiga, se existir
 del /q "{caminho_old}" > NUL 2>&1
-
-:: Renomeia o executável atual para .old (O Windows permite isso mesmo rodando)
 move /Y "{exe_atual}" "{caminho_old}" > NUL 2>&1
-
-:: Move o novo executável baixado para o nome original
 move /Y "{novo_exe}" "{exe_atual}" > NUL 2>&1
-
-:: Desbloqueia o arquivo para evitar o aviso do Windows Defender (SmartScreen)
 powershell -windowstyle hidden -Command "Unblock-File -LiteralPath '{exe_atual}'" > NUL 2>&1
-
-:: Inicia o app atualizado
 start "" "{exe_atual}"
-
-:: Deleta a si mesmo
 del "%~f0" > NUL 2>&1
 """
     with open(bat_path, "w", encoding="utf-8", newline="\r\n") as f:
         f.write(conteudo)
-        
-    # Executa o bat sem criar a janela preta
     CREATE_NO_WINDOW = 0x08000000
     subprocess.Popen([bat_path], creationflags=CREATE_NO_WINDOW)
 
@@ -239,6 +251,11 @@ class Configuracoes:
         self.espessura_borda = 1.0
         self.pos_x = None
         self.pos_y = None
+        self.atalhos = []         # Agora é uma lista dinâmica
+        self.tempos_uso = {}      # Dicionário {caminho_do_atalho: segundos_totais}
+        self.nomes_atalhos = {}   # Dicionário {caminho_do_atalho: nome_personalizado}
+        self.monitorar_tempo_atalhos = True
+        self.tempo_parabens = 10  # Segundos que a tela de Parabéns fica visível (10 a 20)
         self.carregar()
 
     def carregar(self):
@@ -255,6 +272,12 @@ class Configuracoes:
                     self.espessura_borda = NIVEIS_ESPESSURA[indice_espessura(d.get("espessura_borda", 1.0))]
                     self.pos_x = d.get("pos_x", None)
                     self.pos_y = d.get("pos_y", None)
+                    # Limpa Nones para manter retrocompatibilidade com a versão anterior
+                    self.atalhos = [a for a in d.get("atalhos", []) if a is not None]
+                    self.tempos_uso = d.get("tempos_uso", {})
+                    self.nomes_atalhos = d.get("nomes_atalhos", {})
+                    self.monitorar_tempo_atalhos = d.get("monitorar_tempo_atalhos", True)
+                    self.tempo_parabens = max(10, min(20, int(d.get("tempo_parabens", 10))))
             except: pass
 
     def salvar(self):
@@ -277,12 +300,9 @@ def normalizar_cor_hex(valor):
     valor = (valor or "").strip().replace(" ", "")
     if valor.startswith("#"):
         valor = valor[1:]
-    if len(valor) not in (3, 4, 6, 8):
-        return "#ffffff"
-    try:
-        int(valor, 16)
-    except ValueError:
-        return "#ffffff"
+    if len(valor) not in (3, 4, 6, 8): return "#ffffff"
+    try: int(valor, 16)
+    except ValueError: return "#ffffff"
     return "#" + valor
 
 def aplicar_css_fonte_base(key):
@@ -395,7 +415,7 @@ class JanelaConfiguracoes(QDialog):
         super().__init__(parent_widget)
         self.parent_widget = parent_widget
         self.setWindowTitle("Configurações")
-        self.setFixedSize(300, 480)
+        self.setFixedWidth(300)
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.WindowContextHelpButtonHint)
         
         layout = QVBoxLayout(self)
@@ -412,7 +432,16 @@ class JanelaConfiguracoes(QDialog):
         self.check_topo = QCheckBox("Sempre no topo")
         self.check_topo.setChecked(config_app.sempre_no_topo)
 
-        # Layout horizontal para o rótulo e o botão de abrir a pasta no AppData
+        self.check_tempo_atalhos = QCheckBox("Contabilizar tempo dos atalhos")
+        self.check_tempo_atalhos.setChecked(config_app.monitorar_tempo_atalhos)
+
+        self.lbl_tempo_parabens = QLabel()
+        self.slider_tempo_parabens = QSlider(Qt.Orientation.Horizontal)
+        self.slider_tempo_parabens.setRange(10, 20)
+        self.slider_tempo_parabens.setValue(config_app.tempo_parabens)
+        self.slider_tempo_parabens.valueChanged.connect(self.atualizar_label_tempo_parabens)
+        self.atualizar_label_tempo_parabens()
+
         layout_wp_top = QHBoxLayout()
         lbl_wp = QLabel("Papel de Parede:")
         self.btn_abrir_wp = QPushButton("📂 Abrir Pasta")
@@ -456,6 +485,9 @@ class JanelaConfiguracoes(QDialog):
         layout.addWidget(self.check_windows)
         layout.addWidget(self.check_plano)
         layout.addWidget(self.check_topo)
+        layout.addWidget(self.check_tempo_atalhos)
+        layout.addWidget(self.lbl_tempo_parabens)
+        layout.addWidget(self.slider_tempo_parabens)
         layout.addSpacing(10)
         layout.addLayout(layout_wp_top)
         layout.addWidget(self.combo_wp)
@@ -476,10 +508,13 @@ class JanelaConfiguracoes(QDialog):
         
         self.atualizar_preview()
 
+    def atualizar_label_tempo_parabens(self):
+        self.lbl_tempo_parabens.setText(f"Duração da tela de Parabéns: {self.slider_tempo_parabens.value()}s")
+
     def atualizar_preview(self):
         claro = self.check_tema.isChecked()
         wp_nome = self.combo_wp.currentText()
-        wp_path = os.path.join(self.pasta_wallpapers, wp_nome) if wp_nome != "Nenhum" else "Nenhum"
+        wp_path = os.path.join(PASTA_WALLPAPERS, wp_nome) if wp_nome != "Nenhum" else "Nenhum"
         tem_wp = wp_nome != "Nenhum" and os.path.exists(wp_path)
         blur_percent = NIVEIS_DESFOQUE[self.slider_blur.value()]
         espessura = NIVEIS_ESPESSURA[self.slider_esp.value()]
@@ -499,6 +534,8 @@ class JanelaConfiguracoes(QDialog):
         config_app.iniciar_com_windows = self.check_windows.isChecked()
         config_app.segundo_plano = self.check_plano.isChecked()
         config_app.sempre_no_topo = self.check_topo.isChecked()
+        config_app.monitorar_tempo_atalhos = self.check_tempo_atalhos.isChecked()
+        config_app.tempo_parabens = self.slider_tempo_parabens.value()
         config_app.wallpaper = self.combo_wp.currentText()
         config_app.desfoque = NIVEIS_DESFOQUE[self.slider_blur.value()]
         config_app.espessura_borda = NIVEIS_ESPESSURA[self.slider_esp.value()]
@@ -507,6 +544,13 @@ class JanelaConfiguracoes(QDialog):
 
         self.parent_widget.aplicar_sempre_no_topo()
         self.parent_widget.aplicar_tema()
+
+class ClickableLabel(OutlineLabel):
+    clicked = pyqtSignal()
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
 
 class ClickableMes(OutlineLabel):
     clicked = pyqtSignal(int)
@@ -581,7 +625,6 @@ class JanelaCalendario(QWidget):
         self.cor_texto = "#ffffff"
         self.borda_cor = None
         self.esp_borda = 0
-        self.cores_aleatorias = ["#FF5C5C", "#5CFF5C", "#5C5CFF", "#FF5CFF", "#5CFFFF", "#FFFF5C", "#FFA65C", "#A65CFF", "#FF8C42", "#00B4D8"]
 
     def abrir_mes(self, mes_num):
         for i in reversed(range(self.layout_nomes.count())): 
@@ -665,7 +708,6 @@ class WidgetFrutigerAero(QWidget):
         self.top_extra = 26
         self.oldPos = None
         self.fixado = False
-        self.atualizando = False
         self.pagina_atual = 0
         self.anim_group = None
         self.borda_cor = None
@@ -684,6 +726,7 @@ class WidgetFrutigerAero(QWidget):
         self.timer_jogo.start(1000)
 
         self.aniversario_pulado = False
+        self.mostrando_parabens = False
         self.timer_skip = QTimer(self)
         self.timer_skip.setSingleShot(True)
         self.timer_skip.timeout.connect(lambda: (setattr(self, 'aniversario_pulado', True), self.atualizar_interface_aniversario()))
@@ -708,6 +751,7 @@ class WidgetFrutigerAero(QWidget):
                 self.player.setSource(QUrl.fromLocalFile(audio_path))
                 break
 
+        # -- PÁGINA 1: ANIVERSÁRIOS --
         self.page_aniv = QWidget(self.pages_container)
         self.page_aniv.setGeometry(0, 0, 150, 150)
         self.nome_label = OutlineLabel("Carregando...", self.page_aniv)
@@ -727,16 +771,15 @@ class WidgetFrutigerAero(QWidget):
         self.dias_label = OutlineLabel("...", self.page_aniv)
         self.dias_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
+        # -- PÁGINA 2: JOGOS --
         self.page_jogo = QWidget(self.pages_container)
         self.page_jogo.setGeometry(0, 0, 150, 150)
         self.page_jogo.hide()
-
         self.timer_jogo_label = OutlineLabel("", self.page_jogo)
         self.timer_jogo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.timer_jogo_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self.timer_jogo_label.setGeometry(5, 0, 140, 70)
         self.timer_jogo_label.raise_()
-
         self.img_label_jogo1 = OutlineLabel("...", self.page_jogo)
         self.img_label_jogo1.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.img_label_jogo1.setGeometry(0, 28, 75, 122)
@@ -754,32 +797,104 @@ class WidgetFrutigerAero(QWidget):
         self.btn_clique_jogo2.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_clique_jogo2.clicked.connect(lambda: self.abrir_link_jogo(1))
 
+        # -- PÁGINA 3: ATALHOS (Modificada para 3x3 Dinâmico e Subpágina de Tempo) --
+        self.page_atalhos = QWidget(self.pages_container)
+        self.page_atalhos.setGeometry(0, 0, 150, 150)
+        self.page_atalhos.hide()
+        
+        self.stacked_atalhos = QStackedWidget(self.page_atalhos)
+        self.stacked_atalhos.setGeometry(0, 0, 150, 150)
+        
+        # Subpágina 3.1: Grelha com Scroll (3x3)
+        self.atalhos_grid_page = QWidget()
+        self.scroll_atalhos = QScrollArea(self.atalhos_grid_page)
+        self.scroll_atalhos.setGeometry(0, 0, 150, 150)
+        self.scroll_atalhos.setWidgetResizable(True)
+        self.scroll_atalhos.setStyleSheet("background: transparent; border: none;")
+        self.scroll_atalhos.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        
+        self.scroll_content_atalhos = QWidget()
+        self.scroll_content_atalhos.setStyleSheet("background: transparent;")
+        self.layout_atalhos = QGridLayout(self.scroll_content_atalhos)
+        self.layout_atalhos.setContentsMargins(10, 15, 10, 15)
+        self.layout_atalhos.setSpacing(8)
+        self.scroll_atalhos.setWidget(self.scroll_content_atalhos)
+        
+        # Subpágina 3.2: Detalhes do Atalho e Cronómetro de Uso
+        self.atalhos_detail_page = QWidget()
+        layout_detalhes = QVBoxLayout(self.atalhos_detail_page)
+        layout_detalhes.setContentsMargins(10, 10, 10, 10)
+        layout_detalhes.setSpacing(5)
+        
+        self.btn_voltar_atalho = QPushButton("← Voltar")
+        self.btn_voltar_atalho.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_voltar_atalho.clicked.connect(self.fechar_detalhes_atalho)
+        
+        self.lbl_nome_atalho = ClickableLabel("Nome do App")
+        self.lbl_nome_atalho.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_nome_atalho.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.lbl_nome_atalho.setToolTip("Clique para renomear")
+        self.lbl_nome_atalho.clicked.connect(self.renomear_atalho_atual)
+        
+        self.btn_abrir_atalho = QPushButton("Abrir App")
+        self.btn_abrir_atalho.setFixedSize(110, 30)
+        self.btn_abrir_atalho.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_abrir_atalho.clicked.connect(self.executar_atalho_atual)
+        
+        self.lbl_tempo_atalho = OutlineLabel("00:00:00")
+        self.lbl_tempo_atalho.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        self.btn_apagar_atalho = QPushButton("🗑️ Apagar")
+        self.btn_apagar_atalho.setFixedSize(110, 26)
+        self.btn_apagar_atalho.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_apagar_atalho.clicked.connect(self.apagar_atalho_atual)
+
+        layout_detalhes.addWidget(self.btn_voltar_atalho, alignment=Qt.AlignmentFlag.AlignLeft)
+        layout_detalhes.addStretch()
+        layout_detalhes.addWidget(self.lbl_nome_atalho)
+        layout_detalhes.addWidget(self.lbl_tempo_atalho)
+        layout_detalhes.addWidget(self.btn_abrir_atalho, alignment=Qt.AlignmentFlag.AlignCenter)
+        layout_detalhes.addWidget(self.btn_apagar_atalho, alignment=Qt.AlignmentFlag.AlignCenter)
+        layout_detalhes.addStretch()
+        
+        self.stacked_atalhos.addWidget(self.atalhos_grid_page)
+        self.stacked_atalhos.addWidget(self.atalhos_detail_page)
+        self.atalho_atual_idx = None
+        self._ultimo_check_processos = time.monotonic()
+        self._nomes_processo_cache = {}
+        
+        # Iniciar Worker para monitorizar processos (Tempo de uso)
+        self.worker_processos = WorkerMonitorProcessos()
+        self.worker_processos.processos_atualizados.connect(self.processar_nomes_rodando)
+        self.worker_processos.start()
+
+        # -- PAINEL SUPERIOR --
         self.top_panel = QWidget(self)
         self.top_panel.setGeometry(24, 0, 150, self.top_extra)
         top_layout = QHBoxLayout(self.top_panel)
         top_layout.setContentsMargins(10, 4, 10, 2)
         top_layout.setSpacing(3)
-        estilo_botoes = "QPushButton { background-color: rgba(255, 255, 255, 40); border: none; border-radius: 5px; font-size: 10px; } QPushButton:hover { background-color: rgba(255, 255, 255, 80); }"
+        estilo_botoes_top = "QPushButton { background-color: rgba(255, 255, 255, 40); border: none; border-radius: 5px; font-size: 10px; } QPushButton:hover { background-color: rgba(255, 255, 255, 80); }"
 
         self.btn_refresh = QPushButton("🔄", self.top_panel)
         self.btn_refresh.setFixedSize(20, 20)
-        self.btn_refresh.setStyleSheet(estilo_botoes)
+        self.btn_refresh.setStyleSheet(estilo_botoes_top)
         self.btn_refresh.clicked.connect(self.baixar_todos_dados)
         self.btn_lista = QPushButton("📅", self.top_panel)
         self.btn_lista.setFixedSize(20, 20)
-        self.btn_lista.setStyleSheet(estilo_botoes)
+        self.btn_lista.setStyleSheet(estilo_botoes_top)
         self.btn_lista.clicked.connect(self.toggle_calendario)
         self.btn_config = QPushButton("⚙️", self.top_panel)
         self.btn_config.setFixedSize(20, 20)
-        self.btn_config.setStyleSheet(estilo_botoes)
+        self.btn_config.setStyleSheet(estilo_botoes_top)
         self.btn_config.clicked.connect(lambda: JanelaConfiguracoes(self).exec())
         self.btn_pin = QPushButton("🔓", self.top_panel)
         self.btn_pin.setFixedSize(20, 20)
-        self.btn_pin.setStyleSheet(estilo_botoes)
+        self.btn_pin.setStyleSheet(estilo_botoes_top)
         self.btn_pin.clicked.connect(self.alternar_fixacao)
         self.btn_close = QPushButton("❌", self.top_panel)
         self.btn_close.setFixedSize(20, 20)
-        self.btn_close.setStyleSheet(estilo_botoes)
+        self.btn_close.setStyleSheet(estilo_botoes_top)
         self.btn_close.clicked.connect(self.fechar_app)
 
         for b in [self.btn_refresh, self.btn_lista, self.btn_config]: top_layout.addWidget(b)
@@ -792,6 +907,7 @@ class WidgetFrutigerAero(QWidget):
         self.top_panel.hide()
         self.linha_top.hide()
 
+        # -- BOTÕES DE NAVEGAÇÃO --
         self.btn_nav_esq = QPushButton("<", self)
         self.btn_nav_esq.setGeometry(0, 89, 24, 24)
         self.btn_nav_esq.clicked.connect(lambda: self.mudar_pagina("esq"))
@@ -819,6 +935,7 @@ class WidgetFrutigerAero(QWidget):
 
         self.aplicar_sempre_no_topo()
         self.aplicar_tema()
+        self.atualizar_botoes_atalhos()
         self.configurar_bandeja(pix)
         
         self.pulse_timer = QTimer(self)
@@ -836,12 +953,249 @@ class WidgetFrutigerAero(QWidget):
         QTimer.singleShot(100, self.baixar_todos_dados)
         self.posicionar_elementos()
 
+    # ---- FUNÇÕES DA NOVA PÁGINA DE ATALHOS ----
+    
+    def atualizar_botoes_atalhos(self):
+        # Limpa os botões existentes na grelha
+        for i in reversed(range(self.layout_atalhos.count())):
+            widget = self.layout_atalhos.itemAt(i).widget()
+            if widget:
+                widget.setParent(None)
+                
+        provider = QFileIconProvider()
+        linha, coluna = 0, 0
+        
+        # Adiciona botões dos atalhos guardados
+        for idx, caminho in enumerate(config_app.atalhos):
+            btn = QPushButton()
+            btn.setFixedSize(36, 36)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            
+            if caminho and os.path.exists(caminho):
+                icon = provider.icon(QFileInfo(caminho))
+                btn.setIcon(icon)
+                btn.setIconSize(QSize(24, 24))
+            else:
+                btn.setText("?")
+                
+            btn.clicked.connect(lambda checked, i=idx: self.abrir_detalhes_atalho(i))
+            btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            btn.customContextMenuRequested.connect(lambda pos, i=idx: self.menu_atalho(pos, i))
+            
+            self.layout_atalhos.addWidget(btn, linha, coluna)
+            coluna += 1
+            if coluna > 2: # Passar para próxima linha após a 3ª coluna
+                coluna = 0
+                linha += 1
+
+        # Adiciona o botão de [+] no final
+        btn_add = QPushButton("+")
+        btn_add.setFixedSize(36, 36)
+        btn_add.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_add.clicked.connect(self.adicionar_novo_atalho)
+        self.layout_atalhos.addWidget(btn_add, linha, coluna)
+
+        self.aplicar_estilos_aos_botoes_atalho()
+
+    def adicionar_novo_atalho(self):
+        novo_caminho, _ = QFileDialog.getOpenFileName(self, "Selecionar Atalho/Executável", "", "Executáveis/Atalhos (*.exe *.lnk *.bat);;Todos os Arquivos (*.*)")
+        if novo_caminho:
+            config_app.atalhos.append(novo_caminho)
+            config_app.salvar()
+            self.atualizar_botoes_atalhos()
+
+    def menu_atalho(self, pos, idx):
+        menu = QMenu(self)
+        acao_remover = QAction("Remover Atalho", self)
+        acao_remover.triggered.connect(lambda: self.remover_atalho(idx))
+        
+        # Encontra o botão clicado para abrir o menu
+        botao = None
+        # Procura o widget correto dentro do GridLayout
+        for i in range(self.layout_atalhos.count()):
+            widget = self.layout_atalhos.itemAt(i).widget()
+            if isinstance(widget, QPushButton) and widget.underMouse():
+                botao = widget
+                break
+                
+        if botao:
+            menu.exec(botao.mapToGlobal(pos))
+            
+    def remover_atalho(self, idx):
+        if 0 <= idx < len(config_app.atalhos):
+            config_app.atalhos.pop(idx)
+
+            # Remover o atalho NÃO remove o histórico de tempo.
+            config_app.salvar()
+
+            if self.atalho_atual_idx == idx:
+                self.atalho_atual_idx = None
+                self.stacked_atalhos.setCurrentIndex(0)
+            elif self.atalho_atual_idx is not None and self.atalho_atual_idx > idx:
+                self.atalho_atual_idx -= 1
+
+            self.atualizar_botoes_atalhos()
+
+    def abrir_detalhes_atalho(self, idx):
+        self.atalho_atual_idx = idx
+        caminho = config_app.atalhos[idx]
+        self.lbl_nome_atalho.setText(self.nome_exibicao_atalho(caminho))
+        self.atualizar_label_tempo()
+        self.stacked_atalhos.setCurrentIndex(1)
+        self.aplicar_estilos_aos_botoes_atalho()
+
+    def nome_exibicao_atalho(self, caminho):
+        nome_custom = config_app.nomes_atalhos.get(caminho)
+        if nome_custom: return nome_custom
+        nome = os.path.basename(caminho) if caminho else "Atalho"
+        return os.path.splitext(nome)[0].capitalize()
+
+    def renomear_atalho_atual(self):
+        if self.atalho_atual_idx is None or self.atalho_atual_idx >= len(config_app.atalhos): return
+        caminho = config_app.atalhos[self.atalho_atual_idx]
+        nome_atual = self.lbl_nome_atalho.text()
+        novo_nome, ok = QInputDialog.getText(self, "Renomear Atalho", "Novo nome:", text=nome_atual)
+        if ok and novo_nome.strip():
+            config_app.nomes_atalhos[caminho] = novo_nome.strip()
+            config_app.salvar()
+            self.lbl_nome_atalho.setText(novo_nome.strip())
+
+    def fechar_detalhes_atalho(self):
+        self.stacked_atalhos.setCurrentIndex(0)
+        self.atalho_atual_idx = None
+
+    def apagar_atalho_atual(self):
+        if self.atalho_atual_idx is None or self.atalho_atual_idx >= len(config_app.atalhos): return
+        nome = self.lbl_nome_atalho.text()
+        resposta = QMessageBox.question(
+            self, "Apagar Atalho",
+            f"Tem certeza que deseja apagar o atalho \"{nome}\"?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        if resposta == QMessageBox.StandardButton.Yes:
+            self.remover_atalho(self.atalho_atual_idx)
+
+    def executar_atalho_atual(self):
+        if self.atalho_atual_idx is not None and self.atalho_atual_idx < len(config_app.atalhos):
+            caminho = config_app.atalhos[self.atalho_atual_idx]
+            try:
+                os.startfile(caminho)
+            except Exception as e:
+                QMessageBox.warning(self, "Erro", f"Não foi possível abrir o atalho:\n{e}")
+
+    def atualizar_label_tempo(self):
+        if self.atalho_atual_idx is not None and self.atalho_atual_idx < len(config_app.atalhos):
+            caminho = config_app.atalhos[self.atalho_atual_idx]
+            segundos = int(config_app.tempos_uso.get(caminho, 0))
+            m, s = divmod(segundos, 60)
+            h, m = divmod(m, 60)
+            self.lbl_tempo_atalho.setText(f"{h:02d}:{m:02d}:{s:02d}")
+
+    def _nomes_processo_do_atalho(self, caminho):
+        caminho = os.path.abspath(caminho)
+        if caminho in self._nomes_processo_cache:
+            return self._nomes_processo_cache[caminho]
+
+        nomes = set()
+        nome = os.path.basename(caminho).lower()
+        base = os.path.splitext(nome)[0]
+
+        if nome:
+            nomes.add(nome)
+        if base:
+            nomes.add(base)
+
+        # Resolve .lnk uma única vez para detectar executáveis cujo
+        # nome é diferente do nome do atalho.
+        if caminho.lower().endswith(".lnk") and os.path.exists(caminho):
+            try:
+                comando = [
+                    "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                    "-Command",
+                    "$s=(New-Object -ComObject WScript.Shell).CreateShortcut($args[0]); "
+                    "[Console]::Write($s.TargetPath)", caminho
+                ]
+                alvo = subprocess.check_output(
+                    comando,
+                    creationflags=0x08000000,
+                    text=True,
+                    timeout=2
+                ).strip()
+
+                if alvo:
+                    alvo_nome = os.path.basename(alvo).lower()
+                    alvo_base = os.path.splitext(alvo_nome)[0]
+                    if alvo_nome:
+                        nomes.add(alvo_nome)
+                    if alvo_base:
+                        nomes.add(alvo_base)
+            except Exception:
+                pass
+
+        self._nomes_processo_cache[caminho] = nomes
+        return nomes
+
+    def processar_nomes_rodando(self, nomes_rodando):
+        agora = time.monotonic()
+
+        if not config_app.monitorar_tempo_atalhos:
+            self._ultimo_check_processos = agora
+            return
+
+        ultimo = self._ultimo_check_processos
+        self._ultimo_check_processos = agora
+        delta = max(0.0, min(1.5, agora - ultimo))
+
+        if delta <= 0:
+            return
+
+        houve_alteracao = False
+
+        for caminho in list(config_app.atalhos):
+            if not caminho:
+                continue
+
+            candidatos = self._nomes_processo_do_atalho(caminho)
+
+            is_running = any(
+                processo in candidatos or
+                any(
+                    processo.startswith(candidato)
+                    for candidato in candidatos
+                    if candidato
+                )
+                for processo in nomes_rodando
+            )
+
+            if is_running:
+                config_app.tempos_uso[caminho] = (
+                    config_app.tempos_uso.get(caminho, 0) + delta
+                )
+                houve_alteracao = True
+
+        if houve_alteracao:
+            if self.stacked_atalhos.currentIndex() == 1:
+                self.atualizar_label_tempo()
+
+            if int(time.time()) % 15 == 0:
+                config_app.salvar()
+
+    # ---- RESTANTE DA LÓGICA GERAL ----
+
     def aplicar_sempre_no_topo(self):
         flags = self.windowFlags()
         if config_app.sempre_no_topo: flags |= Qt.WindowType.WindowStaysOnTopHint
         else: flags &= ~Qt.WindowType.WindowStaysOnTopHint
         self.setWindowFlags(flags)
         self.show()
+
+    def cores_botoes(self):
+        alpha = alpha_desfoque(config_app.desfoque)
+        alpha_hover = min(255, alpha + 40)
+        if config_app.modo_claro:
+            return f"rgba(240, 240, 240, {alpha})", f"rgba(255, 255, 255, {alpha_hover})"
+        return f"rgba(20, 20, 20, {alpha})", f"rgba(0, 0, 0, {alpha_hover})"
 
     def aplicar_tema(self):
         wp_path = "Nenhum"
@@ -877,10 +1231,16 @@ class WidgetFrutigerAero(QWidget):
                 
         self.container.update_background(wp_path, raio_desfoque(config_app.desfoque), overlay, border, modo_claro=config_app.modo_claro)
         
-        bg_btn, bg_hover = ("rgba(240, 240, 240, 220)", "rgba(255, 255, 255, 255)") if config_app.modo_claro else ("rgba(20, 20, 20, 200)", "rgba(0, 0, 0, 230)")
+        bg_btn, bg_hover = self.cores_botoes()
         estilo = f"QPushButton {{ background-color: {bg_btn}; border-radius: 12px; color: {self.cor_texto}; font-weight: bold; border: none; }} QPushButton:hover {{ background-color: {bg_hover}; }}"
         self.btn_nav_esq.setStyleSheet(estilo)
         self.btn_nav_dir.setStyleSheet(estilo)
+        
+        self.aplicar_estilos_aos_botoes_atalho()
+        
+        # Estilos das labels da página de atalhos
+        self.lbl_nome_atalho.atualizar_estilo(aplicar_css_fonte_base("lista"), self.cor_texto, self.borda_cor, self.esp_borda)
+        self.lbl_tempo_atalho.atualizar_estilo(aplicar_css_fonte_base("nome"), self.cor_texto, self.borda_cor, self.esp_borda)
         
         self.atualizar_interface_aniversario()
         
@@ -896,10 +1256,26 @@ class WidgetFrutigerAero(QWidget):
                 raio_desfoque(config_app.desfoque), borda_cor=self.borda_cor, esp_borda=self.esp_borda, modo_claro=config_app.modo_claro
             )
 
+    def aplicar_estilos_aos_botoes_atalho(self):
+        bg_btn, bg_hover = self.cores_botoes()
+        estilo_atalhos = f"QPushButton {{ background-color: {bg_btn}; border-radius: 12px; color: {self.cor_texto}; font-weight: bold; font-size: 18px; border: none; }} QPushButton:hover {{ background-color: {bg_hover}; }}"
+        
+        for i in range(self.layout_atalhos.count()):
+            widget = self.layout_atalhos.itemAt(i).widget()
+            if isinstance(widget, QPushButton):
+                widget.setStyleSheet(estilo_atalhos)
+                
+        # Estilos dos botões na página de detalhes
+        estilo_menor = f"QPushButton {{ background-color: {bg_btn}; border-radius: 8px; color: {self.cor_texto}; font-size: 11px; font-weight: bold; padding: 4px; border: none; }} QPushButton:hover {{ background-color: {bg_hover}; }}"
+        self.btn_voltar_atalho.setStyleSheet(estilo_menor)
+        self.btn_abrir_atalho.setStyleSheet(estilo_menor)
+
+        estilo_apagar = "QPushButton { background-color: rgba(217, 15, 15, 180); border-radius: 8px; color: #ffffff; font-size: 11px; font-weight: bold; padding: 4px; border: none; } QPushButton:hover { background-color: rgba(217, 15, 15, 230); }"
+        self.btn_apagar_atalho.setStyleSheet(estilo_apagar)
+
     def verificar_atualizacoes(self, manual=False):
         if not getattr(sys, "frozen", False):
-            if manual:
-                QMessageBox.information(self, "Atualizações", f"Versão atual: {APP_VERSION}\n\nO atualizador automático funciona somente no .exe compilado.")
+            if manual: QMessageBox.information(self, "Atualizações", f"Versão atual: {APP_VERSION}\n\nO atualizador automático funciona somente no .exe compilado.")
             return
             
         try:
@@ -910,29 +1286,21 @@ class WidgetFrutigerAero(QWidget):
             versao_remota = str(dados.get("version", "")).strip()
             url_download = str(dados.get("download_url", dados.get("url", URL_DOWNLOAD_EXE))).strip()
             
-            if not versao_remota or not url_download:
-                raise ValueError("JSON de versão inválido no GitHub.")
-                
+            if not versao_remota or not url_download: raise ValueError("JSON de versão inválido no GitHub.")
             if versao_tuple(versao_remota) <= versao_tuple(APP_VERSION):
-                if manual:
-                    QMessageBox.information(self, "Atualizações", f"Você já está usando a versão mais recente.\n\nVersão atual: {APP_VERSION}")
+                if manual: QMessageBox.information(self, "Atualizações", f"Você já está usando a versão mais recente.\n\nVersão atual: {APP_VERSION}")
                 return
                 
             resposta_msg = QMessageBox.question(self, "Atualização disponível", f"Uma nova versão está disponível!\n\nAtual: {APP_VERSION}\nNova: {versao_remota}\n\nDeseja baixar e instalar agora?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.Yes)
-            
-            if resposta_msg != QMessageBox.StandardButton.Yes:
-                return
+            if resposta_msg != QMessageBox.StandardButton.Yes: return
                 
-            # Mostra cursor de carregamento pois o download congela a tela por uns segundos
             QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-            
             temp_dir = tempfile.gettempdir()
             novo_exe = os.path.join(temp_dir, f"MussasWidget_new_{os.getpid()}.exe")
             req_download = urllib.request.Request(url_download, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
             
             with urllib.request.urlopen(req_download, timeout=120) as resposta_download:
-                with open(novo_exe, "wb") as arquivo:
-                    arquivo.write(resposta_download.read())
+                with open(novo_exe, "wb") as arquivo: arquivo.write(resposta_download.read())
                     
             if not os.path.exists(novo_exe) or os.path.getsize(novo_exe) < 100000:
                 try: os.remove(novo_exe)
@@ -940,19 +1308,12 @@ class WidgetFrutigerAero(QWidget):
                 raise RuntimeError("O arquivo baixado parece estar incompleto ou corrompido.")
                 
             QApplication.restoreOverrideCursor()
-            
-            # Confirmação visual para você saber que o download realmente funcionou
             QMessageBox.information(self, "Download Concluído", "A atualização foi baixada com sucesso!\n\nO aplicativo será reiniciado agora.")
-            
             executar_atualizacao_bat(novo_exe)
-            
-            # Fecha IMEDIATAMENTE (sem esperar a fila de eventos do PyQt) liberando o processo pro BAT
             os._exit(0)
-            
         except Exception as e:
             QApplication.restoreOverrideCursor()
-            if manual:
-                QMessageBox.critical(self, "Erro ao atualizar", "Não foi possível verificar ou instalar a atualização.\n\nDetalhes: " + str(e))
+            if manual: QMessageBox.critical(self, "Erro ao atualizar", "Não foi possível verificar ou instalar a atualização.\n\nDetalhes: " + str(e))
 
     def fechar_painel_topo(self):
         if self.top_expanded: self.toggle_top_panel()
@@ -970,11 +1331,22 @@ class WidgetFrutigerAero(QWidget):
 
     def mudar_pagina(self, direcao):
         if self.anim_group and self.anim_group.state() == QAbstractAnimation.State.Running: return
-        page_out = self.page_aniv if self.pagina_atual == 0 else self.page_jogo
-        page_in = self.page_jogo if self.pagina_atual == 0 else self.page_aniv
-        self.pagina_atual = 1 if self.pagina_atual == 0 else 0
         
-        start_x_in, end_x_out = (150, -150) if direcao == "dir" else (-150, 150)
+        paginas = [self.page_aniv, self.page_jogo, self.page_atalhos]
+        page_out = paginas[self.pagina_atual]
+        
+        if direcao == "dir":
+            self.pagina_atual = (self.pagina_atual + 1) % 3
+            start_x_in, end_x_out = 150, -150
+        else:
+            self.pagina_atual = (self.pagina_atual - 1) % 3
+            start_x_in, end_x_out = -150, 150
+            
+        page_in = paginas[self.pagina_atual]
+        
+        for i, p in enumerate(paginas):
+            if i != self.pagina_atual and p != page_out: p.hide()
+                
         page_in.setGeometry(start_x_in, 0, 150, 150)
         page_in.show()
 
@@ -998,12 +1370,14 @@ class WidgetFrutigerAero(QWidget):
 
     def posicionar_elementos(self):
         if not self.anim_group or self.anim_group.state() != QAbstractAnimation.State.Running:
-            if self.pagina_atual == 0:
-                self.page_aniv.setGeometry(0, 0, 150, 150)
-                self.page_jogo.setGeometry(150, 0, 150, 150)
-            else:
-                self.page_jogo.setGeometry(0, 0, 150, 150)
-                self.page_aniv.setGeometry(-150, 0, 150, 150)
+            paginas = [self.page_aniv, self.page_jogo, self.page_atalhos]
+            for i, p in enumerate(paginas):
+                if i == self.pagina_atual:
+                    p.setGeometry(0, 0, 150, 150)
+                    p.show()
+                else:
+                    p.setGeometry(150, 0, 150, 150)
+                    p.hide()
 
         self.nome_label.setGeometry(10, 16, 130, 21)
         self.data_label.setGeometry(10, 36, 130, 16)
@@ -1021,6 +1395,11 @@ class WidgetFrutigerAero(QWidget):
         if 26 <= pos_y < 50:
             self.toggle_top_panel()
             return
+        if event.button() == Qt.MouseButton.LeftButton:
+            pos_x = event.position().x()
+            if self.pagina_atual == 0 and self.mostrando_parabens and 24 <= pos_x <= 174 and 26 <= pos_y <= 176:
+                self.pular_tela_parabens()
+                return
         if event.button() == Qt.MouseButton.LeftButton and not self.fixado:
             self.oldPos = event.globalPosition().toPoint()
 
@@ -1063,10 +1442,7 @@ class WidgetFrutigerAero(QWidget):
             self.timer_autoclose.stop()
 
     def baixar_todos_dados(self):
-        # Evita iniciar uma nova thread se já houver uma ativa
-        if hasattr(self, 'worker') and self.worker.isRunning():
-            return 
-        
+        if hasattr(self, 'worker') and self.worker.isRunning(): return 
         self.worker = WorkerDownload()
         self.worker.resultado.connect(self.processar_dados_baixados)
         self.worker.start()
@@ -1076,14 +1452,10 @@ class WidgetFrutigerAero(QWidget):
         self.dados_jogo = jogo
         self.data_inicio_jogo = data_ini
         self.data_fim_jogo = data_fim
-
         self.carregar_imagem_bytes(img1, self.img_label_jogo1)
         self.carregar_imagem_bytes(img2, self.img_label_jogo2)
-
         self.atualizar_interface_aniversario()
-        
-        if self.calendario_aberto:
-            self.aplicar_tema()
+        if self.calendario_aberto: self.aplicar_tema()
 
     def carregar_imagem_bytes(self, dados_bytes, label):
         if not dados_bytes:
@@ -1091,93 +1463,50 @@ class WidgetFrutigerAero(QWidget):
             label.setText("...")
             label.atualizar_estilo(aplicar_css_fonte_base("nome"), self.cor_texto, self.borda_cor, self.esp_borda)
             return
-        
         pix = QPixmap()
         pix.loadFromData(dados_bytes)
         label.setPixmap(pix.scaled(65, 65, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))        
-
-    def parse_data_jogo(self, valor):
-        if not valor:
-            return None
-        valor = valor.strip()
-        formatos = (
-            "%d/%m/%Y %H:%M:%S", "%d/%m/%Y %H:%M", "%d/%m/%Y",
-            "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d",
-            "%d/%m/%y %H:%M:%S", "%d/%m/%y %H:%M", "%d/%m/%y"
-        )
-        for formato in formatos:
-            try:
-                return datetime.strptime(valor, formato)
-            except ValueError:
-                pass
-        try:
-            return datetime.fromisoformat(valor.replace("Z", "+00:00")).replace(tzinfo=None)
-        except Exception:
-            return None
 
     def atualizar_timer_jogo(self):
         if self.data_fim_jogo is None:
             self.timer_jogo_label.setText("")
             return
-
         agora = datetime.now()
         if self.data_inicio_jogo and agora < self.data_inicio_jogo:
             restante = self.data_inicio_jogo - agora
             texto = "Começa em " + self.formatar_tempo_jogo(restante)
         else:
             restante = self.data_fim_jogo - agora
-            if restante.total_seconds() <= 0:
-                texto = "Encerrado"
-            else:
-                texto = self.formatar_tempo_jogo(restante)
+            if restante.total_seconds() <= 0: texto = "Encerrado"
+            else: texto = self.formatar_tempo_jogo(restante)
 
         self.timer_jogo_label.setText(texto)
-        self.timer_jogo_label.atualizar_estilo(
-            aplicar_css_fonte_base("cal_titulo"),
-            self.cor_texto, self.borda_cor, self.esp_borda
-        )
+        self.timer_jogo_label.atualizar_estilo(aplicar_css_fonte_base("cal_titulo"), self.cor_texto, self.borda_cor, self.esp_borda)
 
     def formatar_tempo_jogo(self, restante):
         total = max(0, int(restante.total_seconds()))
         dias, resto = divmod(total, 86400)
         horas, resto = divmod(resto, 3600)
         minutos, segundos = divmod(resto, 60)
-        if dias:
-            return f"{dias}d {horas:02d}:{minutos:02d}:{segundos:02d}"
+        if dias: return f"{dias}d {horas:02d}:{minutos:02d}:{segundos:02d}"
         return f"{horas:02d}:{minutos:02d}:{segundos:02d}"
-
-    def carregar_imagem_jogo(self):
-        def setar_imagem(url, label):
-            if not url:
-                label.clear()
-                label.setText("...")
-                label.atualizar_estilo(aplicar_css_fonte_base("nome"), self.cor_texto, self.borda_cor, self.esp_borda)
-                return
-            try:
-                req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-                data = urllib.request.urlopen(req).read()
-                pix = QPixmap()
-                pix.loadFromData(data)
-                label.setPixmap(pix.scaled(65, 65, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
-            except:
-                label.clear()
-                label.setText("...")
-                label.atualizar_estilo(aplicar_css_fonte_base("nome"), self.cor_texto, self.borda_cor, self.esp_borda)
-                
-        setar_imagem(self.dados_jogo[0].get("imagem", ""), self.img_label_jogo1)
-        setar_imagem(self.dados_jogo[1].get("imagem", ""), self.img_label_jogo2)
 
     def abrir_link_jogo(self, setor_idx):
         link = self.dados_jogo[setor_idx].get("link", "")
         if link: webbrowser.open(link)
+
+    def pular_tela_parabens(self):
+        if not self.mostrando_parabens or self.aniversario_pulado: return
+        self.timer_skip.stop()
+        self.aniversario_pulado = True
+        self.atualizar_interface_aniversario()
 
     def liberar_animacao_aniversario(self):
         self.aniversario_animacao_pronta = True
         self.atualizar_interface_aniversario()
 
     def iniciar_animacao_parabens(self):
-        if self.aniversario_animacao_executada:
-            return
+        if self.aniversario_animacao_executada: return
         self.aniversario_animacao_executada = True
         pos_nome_final = QPoint(10, 16)
         pos_data_final = QPoint(10, 36)
@@ -1223,6 +1552,7 @@ class WidgetFrutigerAero(QWidget):
             meses = ["", "Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho", "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"]
 
             if dias == 0:
+                self.mostrando_parabens = True
                 self.pulse_timer.start(50)
                 self.nome_label.setText("Parabéns")
                 self.nome_label.atualizar_estilo(aplicar_css_fonte_base("parabens_titulo"), self.cor_texto, self.borda_cor, self.esp_borda)
@@ -1230,8 +1560,7 @@ class WidgetFrutigerAero(QWidget):
                 self.data_label.atualizar_estilo(aplicar_css_fonte_base("parabens_nome"), "#d90f0f", self.borda_cor, self.esp_borda)
                 self.faltam_label.setText("")
                 self.dias_label.setText("🤤")
-                if self.aniversario_animacao_pronta and not self.aniversario_animacao_executada:
-                    self.iniciar_animacao_parabens()
+                if self.aniversario_animacao_pronta and not self.aniversario_animacao_executada: self.iniciar_animacao_parabens()
                 elif not self.aniversario_animacao_pronta:
                     self.nome_label.hide()
                     self.data_label.hide()
@@ -1244,11 +1573,11 @@ class WidgetFrutigerAero(QWidget):
                     self.player.play()
                     self.marcar_como_tocado()
                 if not self.aniversario_pulado and not self.timer_skip.isActive():
-                    self.timer_skip.start(20000)
+                    self.timer_skip.start(config_app.tempo_parabens * 1000)
             else:
+                self.mostrando_parabens = False
                 self.pulse_timer.stop()
-                if self.animacao_parabens and self.animacao_parabens.state() == QAbstractAnimation.State.Running:
-                    self.animacao_parabens.stop()
+                if self.animacao_parabens and self.animacao_parabens.state() == QAbstractAnimation.State.Running: self.animacao_parabens.stop()
                 self.nome_label.move(10, 16)
                 self.data_label.move(10, 36)
                 self.nome_label.show()
@@ -1293,8 +1622,7 @@ class WidgetFrutigerAero(QWidget):
             self.timer_calendario_autoclose.stop()
 
     def reiniciar_timer_calendario(self):
-        if self.calendario_aberto and self.janela_calendario.isVisible():
-            self.timer_calendario_autoclose.start(10000)
+        if self.calendario_aberto and self.janela_calendario.isVisible(): self.timer_calendario_autoclose.start(10000)
 
     def fechar_calendario_por_inatividade(self):
         self.calendario_aberto = False
@@ -1308,15 +1636,13 @@ class WidgetFrutigerAero(QWidget):
         self.timer_calendario_autoclose.stop()
         if config_app.segundo_plano:
             self.hide()
-            if self.calendario_aberto:
-                self.janela_calendario.hide()
+            if self.calendario_aberto: self.janela_calendario.hide()
         else: QApplication.quit()
 
     def configurar_bandeja(self, pix):
         self.tray_icon = QSystemTrayIcon(self)
         tray_pix = QIcon(external_resource_path("calendar.png"))
-        if tray_pix.isNull():
-            tray_pix = QIcon(external_resource_path("icone.ico"))
+        if tray_pix.isNull(): tray_pix = QIcon(external_resource_path("icone.ico"))
         self.tray_icon.setIcon(tray_pix)
         tray_menu = QMenu()
         acao_abrir = QAction("Abrir", self)
@@ -1333,8 +1659,7 @@ if __name__ == '__main__':
     signal.signal(signal.SIGINT, signal.SIG_DFL)
     app = QApplication(sys.argv)
     shared_memory = QSharedMemory("MussasWidget_SingleInstance")
-    if shared_memory.attach():
-        sys.exit(0)
+    if shared_memory.attach(): sys.exit(0)
     shared_memory.create(1)
     QApplication.setQuitOnLastWindowClosed(False) 
     widget = WidgetFrutigerAero()
