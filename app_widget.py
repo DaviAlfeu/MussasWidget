@@ -775,7 +775,7 @@ class WidgetFrutigerAero(QWidget):
         self._atualizar_dots_pagina()
 
         # Se saiu da página principal, inicia o timer de inatividade
-        if self.pagina_atual != 0:
+        if self.pagina_atual != 0 and config_app.voltar_pagina_principal:
             self.timer_inatividade.start(15000)
         else:
             self.timer_inatividade.stop()

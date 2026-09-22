@@ -59,6 +59,7 @@ class Configuracoes:
         self.tempos_uso = {}
         self.nomes_atalhos = {}
         self.monitorar_tempo_atalhos = True
+        self.voltar_pagina_principal = True
         self.tempo_parabens = 10
         self.carregar()
 
@@ -80,6 +81,7 @@ class Configuracoes:
                     self.tempos_uso = d.get("tempos_uso", {})
                     self.nomes_atalhos = d.get("nomes_atalhos", {})
                     self.monitorar_tempo_atalhos = d.get("monitorar_tempo_atalhos", True)
+                    self.voltar_pagina_principal = d.get("voltar_pagina_principal", True)
                     self.tempo_parabens = max(10, min(20, int(d.get("tempo_parabens", 10))))
             except Exception:
                 pass

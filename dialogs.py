@@ -2,7 +2,7 @@ import os
 import sys
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QCheckBox, QLabel, QSlider, QHBoxLayout, 
-    QPushButton, QComboBox, QWidget, QStackedWidget, QGridLayout, QScrollArea, QApplication, QMessageBox, QInputDialog
+    QPushButton, QComboBox, QWidget, QStackedWidget, QGridLayout, QScrollArea, QApplication, QMessageBox, QInputDialog, QTabWidget
 )
 from PyQt6.QtCore import Qt, QEvent
 
@@ -24,6 +24,13 @@ class JanelaConfiguracoes(QDialog):
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.WindowContextHelpButtonHint)
         
         layout = QVBoxLayout(self)
+        abas = QTabWidget()
+        layout.addWidget(abas)
+
+        pagina_personalizacao = QWidget()
+        layout_personalizacao = QVBoxLayout(pagina_personalizacao)
+        pagina_gerais = QWidget()
+        layout_gerais = QVBoxLayout(pagina_gerais)
         
         self.check_tema = QCheckBox("Modo Claro")
         self.check_tema.setChecked(config_app.modo_claro)
@@ -39,6 +46,9 @@ class JanelaConfiguracoes(QDialog):
 
         self.check_tempo_atalhos = QCheckBox("Contabilizar tempo dos atalhos")
         self.check_tempo_atalhos.setChecked(config_app.monitorar_tempo_atalhos)
+
+        self.check_voltar_principal = QCheckBox("Voltar pra pagina principal após 15 segundos")
+        self.check_voltar_principal.setChecked(config_app.voltar_pagina_principal)
 
         self.lbl_tempo_parabens = QLabel()
         self.slider_tempo_parabens = QSlider(Qt.Orientation.Horizontal)
@@ -86,25 +96,30 @@ class JanelaConfiguracoes(QDialog):
         self.btn_update = QPushButton("Verificar Atualizações")
         self.btn_update.clicked.connect(lambda: self.parent_widget.verificar_atualizacoes(manual=True))
         
-        layout.addWidget(self.check_tema)
-        layout.addWidget(self.check_windows)
-        layout.addWidget(self.check_plano)
-        layout.addWidget(self.check_topo)
-        layout.addWidget(self.check_tempo_atalhos)
-        layout.addWidget(self.lbl_tempo_parabens)
-        layout.addWidget(self.slider_tempo_parabens)
-        layout.addSpacing(10)
-        layout.addLayout(layout_wp_top)
-        layout.addWidget(self.combo_wp)
-        layout.addWidget(self.lbl_blur)
-        layout.addWidget(self.slider_blur)
-        layout.addWidget(self.lbl_espessura)
-        layout.addWidget(self.slider_esp)
-        layout.addSpacing(5)
-        layout.addWidget(self.preview_frame, alignment=Qt.AlignmentFlag.AlignCenter)
-        layout.addStretch()
-        layout.addWidget(self.lbl_versao)
-        layout.addWidget(self.btn_update)
+        layout_personalizacao.addWidget(self.check_tema)
+        layout_personalizacao.addSpacing(6)
+        layout_personalizacao.addLayout(layout_wp_top)
+        layout_personalizacao.addWidget(self.combo_wp)
+        layout_personalizacao.addWidget(self.lbl_blur)
+        layout_personalizacao.addWidget(self.slider_blur)
+        layout_personalizacao.addWidget(self.lbl_espessura)
+        layout_personalizacao.addWidget(self.slider_esp)
+        layout_personalizacao.addWidget(self.preview_frame, alignment=Qt.AlignmentFlag.AlignCenter)
+        layout_personalizacao.addStretch()
+
+        layout_gerais.addWidget(self.check_windows)
+        layout_gerais.addWidget(self.check_plano)
+        layout_gerais.addWidget(self.check_topo)
+        layout_gerais.addWidget(self.check_tempo_atalhos)
+        layout_gerais.addWidget(self.check_voltar_principal)
+        layout_gerais.addWidget(self.lbl_tempo_parabens)
+        layout_gerais.addWidget(self.slider_tempo_parabens)
+        layout_gerais.addStretch()
+        layout_gerais.addWidget(self.lbl_versao)
+        layout_gerais.addWidget(self.btn_update)
+
+        abas.addTab(pagina_personalizacao, "Personalização")
+        abas.addTab(pagina_gerais, "Gerais")
         
         self.check_tema.toggled.connect(self.atualizar_preview)
         self.combo_wp.currentTextChanged.connect(self.atualizar_preview)
@@ -140,6 +155,7 @@ class JanelaConfiguracoes(QDialog):
         config_app.segundo_plano = self.check_plano.isChecked()
         config_app.sempre_no_topo = self.check_topo.isChecked()
         config_app.monitorar_tempo_atalhos = self.check_tempo_atalhos.isChecked()
+        config_app.voltar_pagina_principal = self.check_voltar_principal.isChecked()
         config_app.tempo_parabens = self.slider_tempo_parabens.value()
         config_app.wallpaper = self.combo_wp.currentText()
         config_app.desfoque = NIVEIS_DESFOQUE[self.slider_blur.value()]
@@ -149,6 +165,10 @@ class JanelaConfiguracoes(QDialog):
 
         self.parent_widget.aplicar_sempre_no_topo()
         self.parent_widget.aplicar_tema()
+        if config_app.voltar_pagina_principal and self.parent_widget.pagina_atual != 0:
+            self.parent_widget.timer_inatividade.start(15000)
+        else:
+            self.parent_widget.timer_inatividade.stop()
 
 
 class JanelaCalendario(QWidget):
