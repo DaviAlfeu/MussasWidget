@@ -78,13 +78,14 @@ def executar_atualizacao_bat(novo_exe):
     caminho_old = exe_atual + ".old"
     bat_path = os.path.join(tempfile.gettempdir(), f"mussas_update_{os.getpid()}.bat")
     conteudo = f"""@echo off
-ping 127.0.0.1 -n 3 > NUL
+ping 127.0.0.1 -n 4 > NUL
 taskkill /F /PID {os.getpid()} > NUL 2>&1
-ping 127.0.0.1 -n 2 > NUL
+ping 127.0.0.1 -n 8 > NUL
 del /q "{caminho_old}" > NUL 2>&1
 move /Y "{exe_atual}" "{caminho_old}" > NUL 2>&1
 move /Y "{novo_exe}" "{exe_atual}" > NUL 2>&1
 powershell -windowstyle hidden -Command "Unblock-File -LiteralPath '{exe_atual}'" > NUL 2>&1
+ping 127.0.0.1 -n 4 > NUL
 start "" "{exe_atual}"
 del "%~f0" > NUL 2>&1
 """

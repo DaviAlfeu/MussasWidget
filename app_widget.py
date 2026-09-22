@@ -54,6 +54,11 @@ class WidgetFrutigerAero(QWidget):
         self.anim_group = None
         self.borda_cor = None
         self.esp_borda = 0
+
+        # Timer de inatividade: volta para página principal após 15s
+        self.timer_inatividade = QTimer(self)
+        self.timer_inatividade.setSingleShot(True)
+        self.timer_inatividade.timeout.connect(self._voltar_pagina_principal)
         
         self.timer_autoclose = QTimer(self)
         self.timer_autoclose.setSingleShot(True)
@@ -274,6 +279,9 @@ class WidgetFrutigerAero(QWidget):
         else:
             s = QApplication.primaryScreen().geometry()
             self.move((s.width() - self.width()) // 2, (s.height() - self.height()) // 2)
+
+        # Bolinhas indicadoras de página (ficam sobre o container, na parte inferior)
+        self._criar_dots_pagina()
 
         self.aplicar_sempre_no_topo()
         self.aplicar_tema()
@@ -530,6 +538,48 @@ class WidgetFrutigerAero(QWidget):
 
     # ---- RESTANTE DA LÓGICA GERAL ----
 
+    # ---- BOLINHAS INDICADORAS DE PÁGINA ----
+
+    def _criar_dots_pagina(self):
+        """Cria 3 bolinhas indicadoras como filhos do pages_container, na parte inferior."""
+        NUM_DOTS = 3
+        DOT_SIZE = 6
+        DOT_SPACING = 8
+        total_w = NUM_DOTS * DOT_SIZE + (NUM_DOTS - 1) * DOT_SPACING
+        start_x = (150 - total_w) // 2
+        y = 150 - 12   # 12px acima da borda inferior do pages_container
+
+        self.dots = []
+        for i in range(NUM_DOTS):
+            dot = QFrame(self.pages_container)
+            dot.setFixedSize(DOT_SIZE, DOT_SIZE)
+            dot.move(start_x + i * (DOT_SIZE + DOT_SPACING), y)
+            dot.raise_()
+            dot.show()
+            self.dots.append(dot)
+
+        self._atualizar_dots_pagina()
+
+    def _atualizar_dots_pagina(self):
+        """Atualiza a cor das bolinhas conforme a página atual e o tema."""
+        cor_ativa  = "#111111" if config_app.modo_claro else "#ffffff"
+        cor_inativa = "rgba(150, 150, 150, 140)"
+        for i, dot in enumerate(self.dots):
+            cor = cor_ativa if i == self.pagina_atual else cor_inativa
+            dot.setStyleSheet(f"QFrame {{ background-color: {cor}; border-radius: 3px; border: none; }}")
+            dot.raise_()
+
+    def _voltar_pagina_principal(self):
+        """Retorna à página de aniversários (página 0) após inatividade."""
+        if self.pagina_atual != 0:
+            # Calcula direção mais curta para voltar à página 0
+            self.mudar_pagina("esq" if self.pagina_atual == 1 else "dir")
+            # Se ainda não chegou em 0 (estava na pág 2 e foi para 1), agenda mais uma troca
+            if self.pagina_atual != 0:
+                QTimer.singleShot(300, self._voltar_pagina_principal)
+
+    # ---- LÓGICA GERAL ----
+
     def aplicar_sempre_no_topo(self):
         flags = self.windowFlags()
         if config_app.sempre_no_topo: flags |= Qt.WindowType.WindowStaysOnTopHint
@@ -602,6 +652,10 @@ class WidgetFrutigerAero(QWidget):
                 self.dados_planilha, self.cor_texto, overlay, border, wp_path, 
                 raio_desfoque(config_app.desfoque), borda_cor=self.borda_cor, esp_borda=self.esp_borda, modo_claro=config_app.modo_claro
             )
+
+        # Atualiza cor das bolinhas conforme o tema
+        if hasattr(self, 'dots'):
+            self._atualizar_dots_pagina()
 
     def aplicar_estilos_aos_botoes_atalho(self):
         bg_btn, bg_hover = self.cores_botoes()
@@ -717,6 +771,14 @@ class WidgetFrutigerAero(QWidget):
         self.anim_group.addAnimation(self.anim_in)
         self.anim_group.finished.connect(page_out.hide)
         self.anim_group.start()
+
+        self._atualizar_dots_pagina()
+
+        # Se saiu da página principal, inicia o timer de inatividade
+        if self.pagina_atual != 0:
+            self.timer_inatividade.start(15000)
+        else:
+            self.timer_inatividade.stop()
 
     def posicionar_elementos(self):
         if not self.anim_group or self.anim_group.state() != QAbstractAnimation.State.Running:
