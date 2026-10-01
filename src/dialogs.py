@@ -5,10 +5,12 @@ from PyQt6.QtWidgets import (
     QPushButton, QComboBox, QWidget, QStackedWidget, QGridLayout, QScrollArea, QApplication, QMessageBox, QInputDialog, QTabWidget
 )
 from PyQt6.QtCore import Qt, QEvent
+from PyQt6.QtGui import QColor, QPainter
 
 from config import (
     config_app, APP_VERSION, PASTA_WALLPAPERS, 
-    NIVEIS_DESFOQUE, NIVEIS_ESPESSURA, indice_desfoque, indice_espessura
+    NIVEIS_DESFOQUE, NIVEIS_ESPESSURA, indice_desfoque, indice_espessura,
+    MARGEM_SEGURANCA_BOLINHAS
 )
 from utils import (
     raio_desfoque, normalizar_cor_hex, aplicar_css_fonte_base, alpha_desfoque
@@ -16,6 +18,48 @@ from utils import (
 from ui_components import BlurredBackgroundFrame, OutlineLabel, ClickableMes, ClickableLabel
 from gerenciador_modulos import PASTA_MODULOS, estado_modulo
 from workers import WorkerModulosGitHub
+
+
+class PreviewBolinhas(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.posicao = "baixo"
+        self.modo_claro = False
+        self.setGeometry(parent.rect())
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setStyleSheet("background: transparent;")
+
+    def set_preferencias(self, posicao, modo_claro):
+        self.posicao = posicao
+        self.modo_claro = modo_claro
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        escala = min(self.width(), self.height()) / 150
+        tamanho = max(3, round(6 * escala))
+        espacamento = max(1, round(8 * escala))
+        margem = round(MARGEM_SEGURANCA_BOLINHAS * escala)
+        recuo = (margem - tamanho) // 2
+        total = tamanho * 3 + espacamento * 2
+        inicio = (self.width() - total) // 2
+        for indice in range(3):
+            if self.posicao in ("baixo", "cima"):
+                x = inicio + indice * (tamanho + espacamento)
+                y = recuo if self.posicao == "cima" else self.height() - margem + recuo
+            else:
+                x = recuo if self.posicao == "esquerda" else self.width() - margem + recuo
+                y = inicio + indice * (tamanho + espacamento)
+            if indice == 0:
+                cor = QColor("#202124") if self.modo_claro else QColor("#ffffff")
+            else:
+                cor = QColor("#9aa0a6")
+            painter.setBrush(cor)
+            painter.drawEllipse(x, y, tamanho, tamanho)
+
 
 class JanelaConfiguracoes(QDialog):
     def __init__(self, parent_widget):
@@ -53,6 +97,19 @@ class JanelaConfiguracoes(QDialog):
 
         self.check_voltar_principal = QCheckBox("Voltar pra pagina principal após 15 segundos")
         self.check_voltar_principal.setChecked(config_app.voltar_pagina_principal)
+
+        self.combo_pagina_principal = QComboBox()
+        for nome_pagina, chave_pagina in self.parent_widget.paginas_disponiveis():
+            self.combo_pagina_principal.addItem(nome_pagina, chave_pagina)
+        indice_principal = self.combo_pagina_principal.findData(config_app.pagina_principal)
+        self.combo_pagina_principal.setCurrentIndex(max(0, indice_principal))
+
+        self.combo_posicao_bolinhas = QComboBox()
+        for rotulo, valor in (("Embaixo", "baixo"), ("Em cima", "cima"),
+                              ("À direita", "direita"), ("À esquerda", "esquerda")):
+            self.combo_posicao_bolinhas.addItem(rotulo, valor)
+        indice_posicao = self.combo_posicao_bolinhas.findData(config_app.posicao_bolinhas)
+        self.combo_posicao_bolinhas.setCurrentIndex(max(0, indice_posicao))
 
         self.lbl_tempo_parabens = QLabel()
         self.slider_tempo_parabens = QSlider(Qt.Orientation.Horizontal)
@@ -93,6 +150,11 @@ class JanelaConfiguracoes(QDialog):
         
         self.preview_frame = BlurredBackgroundFrame(self)
         self.preview_frame.setFixedSize(100, 100) 
+        self.preview_bolinhas = PreviewBolinhas(self.preview_frame)
+        self.preview_bolinhas.set_preferencias(
+            self.combo_posicao_bolinhas.currentData(), self.check_tema.isChecked()
+        )
+        self.preview_bolinhas.raise_()
         
         self.lbl_versao = QLabel(f"Versão atual: {APP_VERSION}")
         self.lbl_versao.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -126,6 +188,8 @@ class JanelaConfiguracoes(QDialog):
         layout_personalizacao.addWidget(self.slider_blur)
         layout_personalizacao.addWidget(self.lbl_espessura)
         layout_personalizacao.addWidget(self.slider_esp)
+        layout_personalizacao.addWidget(QLabel("Posição das bolinhas:"))
+        layout_personalizacao.addWidget(self.combo_posicao_bolinhas)
         layout_personalizacao.addWidget(self.preview_frame, alignment=Qt.AlignmentFlag.AlignCenter)
         layout_personalizacao.addStretch()
 
@@ -134,6 +198,8 @@ class JanelaConfiguracoes(QDialog):
         layout_gerais.addWidget(self.check_topo)
         layout_gerais.addWidget(self.check_tempo_atalhos)
         layout_gerais.addWidget(self.check_voltar_principal)
+        layout_gerais.addWidget(QLabel("Página principal:"))
+        layout_gerais.addWidget(self.combo_pagina_principal)
         layout_gerais.addWidget(self.lbl_tempo_parabens)
         layout_gerais.addWidget(self.slider_tempo_parabens)
         layout_gerais.addStretch()
@@ -145,12 +211,25 @@ class JanelaConfiguracoes(QDialog):
         abas.addTab(pagina_modulos, "Módulos")
         
         self.check_tema.toggled.connect(self.atualizar_preview)
+        self.check_tema.toggled.connect(self.atualizar_preview_bolinhas)
+        self.combo_posicao_bolinhas.currentIndexChanged.connect(self.atualizar_posicao_bolinhas)
         self.combo_wp.currentTextChanged.connect(self.atualizar_preview)
         self.slider_blur.valueChanged.connect(self.atualizar_preview)
         self.slider_esp.valueChanged.connect(self.atualizar_preview)
         
         self.atualizar_preview()
+        self.atualizar_preview_bolinhas()
         self.atualizar_lista_modulos()
+
+    def atualizar_preview_bolinhas(self):
+        self.preview_bolinhas.set_preferencias(
+            self.combo_posicao_bolinhas.currentData(), self.check_tema.isChecked()
+        )
+
+    def atualizar_posicao_bolinhas(self):
+        config_app.posicao_bolinhas = self.combo_posicao_bolinhas.currentData()
+        self.atualizar_preview_bolinhas()
+        self.parent_widget._criar_dots_pagina()
 
     def atualizar_lista_modulos(self):
         if self._worker_modulos is not None and self._worker_modulos.isRunning():
@@ -299,6 +378,11 @@ class JanelaConfiguracoes(QDialog):
             overlay = (245, 245, 245, 180) if claro else (25, 25, 25, 175)
             border = (255, 255, 255, 200) if claro else (255, 255, 255, 50)
         self.preview_frame.update_background(wp_path, raio_desfoque(blur_percent), overlay, border, 12, modo_claro=claro)
+        if not tem_wp:
+            fundo_preview = QColor(self.preview_frame.overlay_color)
+            fundo_preview.setAlpha(255)
+            self.preview_frame.overlay_color = fundo_preview
+            self.preview_frame.update()
 
     def closeEvent(self, event):
         config_app.modo_claro = self.check_tema.isChecked()
@@ -308,6 +392,8 @@ class JanelaConfiguracoes(QDialog):
         config_app.monitorar_tempo_atalhos = self.check_tempo_atalhos.isChecked()
         config_app.voltar_pagina_principal = self.check_voltar_principal.isChecked()
         config_app.tempo_parabens = self.slider_tempo_parabens.value()
+        config_app.pagina_principal = self.combo_pagina_principal.currentData()
+        config_app.posicao_bolinhas = self.combo_posicao_bolinhas.currentData()
         config_app.wallpaper = self.combo_wp.currentText()
         config_app.desfoque = NIVEIS_DESFOQUE[self.slider_blur.value()]
         config_app.espessura_borda = NIVEIS_ESPESSURA[self.slider_esp.value()]
@@ -316,7 +402,9 @@ class JanelaConfiguracoes(QDialog):
 
         self.parent_widget.aplicar_sempre_no_topo()
         self.parent_widget.aplicar_tema()
-        if config_app.voltar_pagina_principal and self.parent_widget.pagina_atual != 0:
+        self.parent_widget._criar_dots_pagina()
+        pagina_principal = self.parent_widget._indice_pagina_principal()
+        if config_app.voltar_pagina_principal and self.parent_widget.pagina_atual != pagina_principal:
             self.parent_widget.timer_inatividade.start(15000)
         else:
             self.parent_widget.timer_inatividade.stop()

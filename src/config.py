@@ -8,6 +8,8 @@ URL_UPDATE_CHECK = "https://api.github.com/repos/DaviAlfeu/MussasWidget/contents
 URL_DOWNLOAD_EXE = "https://github.com/DaviAlfeu/MussasWidget/raw/main/WidgetAniversarios.exe"
 URL_CSV_ANIVERSARIOS = "https://docs.google.com/spreadsheets/d/1W1cX9dCAFnLPjDImSB6rjSSC0GhvOX0rp_HiaHeHAGI/export?format=csv&gid=0"
 URL_CSV_JOGO = "https://docs.google.com/spreadsheets/d/1W1cX9dCAFnLPjDImSB6rjSSC0GhvOX0rp_HiaHeHAGI/export?format=csv&gid=36262169"
+MARGEM_SEGURANCA_BOLINHAS = 19
+MARGEM_AREA_ICONES = 14
 
 CONFIG_FONTES = {
     "nome": {"fonte": "Lemon Milk", "tamanho": 16, "peso": "bold"},
@@ -61,6 +63,8 @@ class Configuracoes:
         self.monitorar_tempo_atalhos = True
         self.voltar_pagina_principal = True
         self.tempo_parabens = 10
+        self.posicao_bolinhas = "baixo"
+        self.pagina_principal = ""
         self.carregar()
 
     def carregar(self):
@@ -83,6 +87,8 @@ class Configuracoes:
                     self.monitorar_tempo_atalhos = d.get("monitorar_tempo_atalhos", True)
                     self.voltar_pagina_principal = d.get("voltar_pagina_principal", True)
                     self.tempo_parabens = max(10, min(20, int(d.get("tempo_parabens", 10))))
+                    self.posicao_bolinhas = d.get("posicao_bolinhas", "baixo")
+                    self.pagina_principal = d.get("pagina_principal", "")
             except Exception:
                 pass
 

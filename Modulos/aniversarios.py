@@ -11,7 +11,9 @@ from PyQt6.QtGui import QPixmap, QIcon
 from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
 
 # Imports do projeto
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"
+))
 from config import config_app, STATE_FILE, CONFIG_FONTES
 from utils import resource_path, external_resource_path, aplicar_css_fonte_base, normalizar_cor_hex, parse_data_jogo_bg
 from ui_components import OutlineLabel, ClickableLabel
@@ -161,11 +163,52 @@ class Plugin(PluginBase):
     def criar_pagina(self):
         # Registramos as 2 páginas manualmente
         # A página de aniversários deve ser a PRIMEIRA (antes dos atalhos)
-        idx_aniv = self.app.registrar_pagina(self.page_aniv, posicao=0)
-        idx_jogo = self.app.registrar_pagina(self.page_jogo, posicao=1)
+        idx_aniv = self.app.registrar_pagina(
+            self.page_aniv, posicao=0, chave="aniversarios", nome="Aniversários"
+        )
+        idx_jogo = self.app.registrar_pagina(
+            self.page_jogo, posicao=1, chave="jogos", nome="Jogos"
+        )
         self._idx_aniv = idx_aniv
         self._idx_jogo = idx_jogo
         return None  # Já registramos manualmente
+
+    def ao_mudar_area_pagina(self, area):
+        x, y, largura, altura = area
+        margem = 4
+        largura_util = max(1, largura - margem * 2)
+        self.nome_label.setGeometry(x + margem, y + 3, largura_util, 21)
+        self.data_label.setGeometry(x + margem, y + 24, largura_util, 16)
+        linha_y = y + int(altura * 0.43)
+        self.linha_meio.setGeometry(x + margem, linha_y, largura_util, 1)
+        self.icone_label.move(
+            x + (largura - self.icone_label.width()) // 2, linha_y - 10
+        )
+        self.faltam_label.setGeometry(
+            x + margem, y + int(altura * 0.62), largura_util, 16
+        )
+        self.dias_label.setGeometry(
+            x + margem, y + int(altura * 0.72), largura_util,
+            max(20, altura - int(altura * 0.74))
+        )
+
+        largura_coluna = max(1, largura // 2)
+        tamanho_botao = min(65, largura_coluna - margem * 2, altura - 34)
+        y_botao = y + altura - tamanho_botao - margem
+        self.timer_jogo_label.setGeometry(x + margem, y + 2, largura_util, 24)
+        self.img_label_jogo1.setGeometry(x, y + 26, largura_coluna, altura - 26)
+        self.img_label_jogo2.setGeometry(
+            x + largura_coluna, y + 26, largura - largura_coluna, altura - 26
+        )
+        self.btn_clique_jogo1.setGeometry(
+            x + (largura_coluna - tamanho_botao) // 2, y_botao,
+            tamanho_botao, tamanho_botao
+        )
+        coluna_direita = largura - largura_coluna
+        self.btn_clique_jogo2.setGeometry(
+            x + largura_coluna + (coluna_direita - tamanho_botao) // 2,
+            y_botao, tamanho_botao, tamanho_botao
+        )
 
     def botoes_topo(self):
         return [

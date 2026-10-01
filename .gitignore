@@ -6,6 +6,7 @@ __pycache__/
 build/
 dist/
 *.spec
+!MussasWidget.spec
 
 # Arquivos locais do aplicativo
 config.json

@@ -14,18 +14,19 @@ from PyQt6.QtWidgets import (
     QFileDialog, QInputDialog, QFileIconProvider
 )
 from PyQt6.QtCore import (
-    Qt, QTimer, QUrl, QPoint, pyqtSignal,
+    Qt, QTimer, QUrl, QPoint, QRect, pyqtSignal,
     QPropertyAnimation, QParallelAnimationGroup, QEasingCurve, QAbstractAnimation, QEvent, QSharedMemory,
     QSize, QFileInfo
 )
 from PyQt6.QtGui import (
     QCursor, QPixmap, QIcon, QAction, 
-    QPainter, QPainterPath, QColor, QImage, QPen
+    QPainter, QPainterPath, QColor, QImage, QPen, QRegion
 )
 
 from config import (
     config_app, APP_VERSION, URL_UPDATE_CHECK, URL_DOWNLOAD_EXE, 
-    PASTA_WALLPAPERS, CONFIG_FONTES
+    PASTA_WALLPAPERS, CONFIG_FONTES, MARGEM_SEGURANCA_BOLINHAS,
+    MARGEM_AREA_ICONES
 )
 from utils import (
     raio_desfoque, alpha_desfoque, get_app_dir, resource_path, external_resource_path, carregar_fontes, versao_tuple, caminho_executavel_atual, executar_atualizacao_bat, normalizar_cor_hex, aplicar_css_fonte_base
@@ -157,6 +158,8 @@ class WidgetFrutigerAero(QWidget):
         self._nomes_processo_cache = {}
 
         # Registrar a página de atalhos como a primeira página
+        self.page_atalhos.setProperty("mussas_page_key", "atalhos")
+        self.page_atalhos.setProperty("mussas_page_name", "Atalhos")
         self.paginas.append(self.page_atalhos)
         self.page_atalhos.show()
         
@@ -233,6 +236,7 @@ class WidgetFrutigerAero(QWidget):
         from gerenciador_modulos import GerenciadorModulos
         self.gerenciador_modulos = GerenciadorModulos(self)
         self.gerenciador_modulos.carregar_modulos()
+        self.pagina_atual = self._indice_pagina_principal()
 
         # Bolinhas indicadoras de página
         self._criar_dots_pagina()
@@ -252,8 +256,10 @@ class WidgetFrutigerAero(QWidget):
 
     # ---- API para módulos ----
 
-    def registrar_pagina(self, widget, posicao=None):
+    def registrar_pagina(self, widget, posicao=None, chave=None, nome=None):
         """Registra um QWidget como nova página. Retorna o índice."""
+        widget.setProperty("mussas_page_key", chave or widget.objectName() or f"pagina_{len(self.paginas)}")
+        widget.setProperty("mussas_page_name", nome or widget.objectName() or f"Página {len(self.paginas) + 1}")
         widget.setParent(self.pages_container)
         widget.setGeometry(150, 0, 150, 150)
         widget.hide()
@@ -264,7 +270,21 @@ class WidgetFrutigerAero(QWidget):
                 self.pagina_atual += 1
         else:
             self.paginas.append(widget)
+        self._aplicar_area_segura_paginas()
         return self.paginas.index(widget)
+
+    def paginas_disponiveis(self):
+        return [
+            (pagina.property("mussas_page_name"), pagina.property("mussas_page_key"))
+            for pagina in self.paginas
+        ]
+
+    def _indice_pagina_principal(self):
+        chave = config_app.pagina_principal
+        for indice, pagina in enumerate(self.paginas):
+            if pagina.property("mussas_page_key") == chave:
+                return indice
+        return 0
 
     def adicionar_botao_topo(self, nome_png, texto_fallback, callback, posicao=None):
         """Adiciona um botão no painel superior. Retorna o QPushButton."""
@@ -289,19 +309,30 @@ class WidgetFrutigerAero(QWidget):
             widget = self.layout_atalhos.itemAt(i).widget()
             if widget:
                 widget.setParent(None)
+
+        self.layout_atalhos.setContentsMargins(6, 6, 6, 6)
+        self.layout_atalhos.setSpacing(4)
                 
         provider = QFileIconProvider()
         linha, coluna = 0, 0
+        max_colunas = 3
+        area = self._area_segura_pagina()
+        total_itens = len(config_app.atalhos) + 1
+        total_linhas = max(1, (total_itens + max_colunas - 1) // max_colunas)
+        largura_botao = (area.width() - 12 - 4 * (max_colunas - 1)) // max_colunas
+        altura_botao = (area.height() - 12 - 4 * (total_linhas - 1)) // total_linhas
+        tamanho_botao = max(12, min(36, largura_botao, altura_botao))
+        tamanho_icone = max(10, min(24, tamanho_botao - 8))
         
         for idx, caminho in enumerate(config_app.atalhos):
             btn = QPushButton()
-            btn.setFixedSize(36, 36)
+            btn.setFixedSize(tamanho_botao, tamanho_botao)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             
             if caminho and os.path.exists(caminho):
                 icon = provider.icon(QFileInfo(caminho))
                 btn.setIcon(icon)
-                btn.setIconSize(QSize(24, 24))
+                btn.setIconSize(QSize(tamanho_icone, tamanho_icone))
             else:
                 btn.setText("?")
                 
@@ -311,12 +342,12 @@ class WidgetFrutigerAero(QWidget):
             
             self.layout_atalhos.addWidget(btn, linha, coluna)
             coluna += 1
-            if coluna > 2:
+            if coluna >= max_colunas:
                 coluna = 0
                 linha += 1
 
         btn_add = QPushButton("+")
-        btn_add.setFixedSize(36, 36)
+        btn_add.setFixedSize(tamanho_botao, tamanho_botao)
         btn_add.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_add.clicked.connect(self.adicionar_novo_atalho)
         self.layout_atalhos.addWidget(btn_add, linha, coluna)
@@ -500,34 +531,73 @@ class WidgetFrutigerAero(QWidget):
     # ---- BOLINHAS INDICADORAS DE PÁGINA ----
 
     def _criar_dots_pagina(self):
-        """Cria bolinhas indicadoras como filhos do pages_container."""
+        """Cria os indicadores sobre uma pequena área reservada da página."""
         num_dots = len(self.paginas)
-        if num_dots <= 1:
-            self.dots = []
-            return
-
         DOT_SIZE = 6
         DOT_SPACING = 8
-        total_w = num_dots * DOT_SIZE + (num_dots - 1) * DOT_SPACING
-        start_x = (150 - total_w) // 2
-        y = 150 - 12
 
-        # Limpar dots anteriores
-        if hasattr(self, 'dots'):
+        if hasattr(self, "container_dots"):
+            self.container_dots.hide()
+            self.container_dots.deleteLater()
+            del self.container_dots
+        if hasattr(self, "dots"):
             for dot in self.dots:
-                dot.setParent(None)
+                dot.hide()
                 dot.deleteLater()
-
         self.dots = []
+        if num_dots <= 1:
+            self._aplicar_area_segura_paginas()
+            return
+
+        posicao = config_app.posicao_bolinhas
+        if posicao not in ("baixo", "cima", "esquerda", "direita"):
+            posicao = "baixo"
+        margem = MARGEM_SEGURANCA_BOLINHAS
+        recuo_ponto = (margem - DOT_SIZE) // 2
+        total = num_dots * DOT_SIZE + (num_dots - 1) * DOT_SPACING
+        if posicao in ("baixo", "cima"):
+            inicio = (150 - total) // 2
+            x_base = inicio
+            y_base = 150 - margem + recuo_ponto if posicao == "baixo" else recuo_ponto
+        else:
+            inicio = (150 - total) // 2
+            x_base = recuo_ponto if posicao == "esquerda" else 150 - margem + recuo_ponto
+            y_base = inicio
+
         for i in range(num_dots):
             dot = QFrame(self.pages_container)
             dot.setFixedSize(DOT_SIZE, DOT_SIZE)
-            dot.move(start_x + i * (DOT_SIZE + DOT_SPACING), y)
+            if posicao in ("baixo", "cima"):
+                dot.move(x_base + i * (DOT_SIZE + DOT_SPACING), y_base)
+            else:
+                dot.move(x_base, y_base + i * (DOT_SIZE + DOT_SPACING))
             dot.raise_()
             dot.show()
             self.dots.append(dot)
 
+        self._aplicar_area_segura_paginas()
         self._atualizar_dots_pagina()
+
+    def _area_segura_pagina(self):
+        margem = MARGEM_AREA_ICONES
+        return QRect(margem, margem, 150 - margem * 2, 150 - margem * 2)
+
+    def _aplicar_area_segura_paginas(self):
+        area = self._area_segura_pagina()
+        self.container.setGeometry(self.pages_container.geometry())
+        for pagina in self.paginas:
+            pagina.setProperty("mussas_safe_area", area)
+            pagina.setMask(QRegion(area))
+
+        if hasattr(self, "stacked_atalhos"):
+            self.stacked_atalhos.setGeometry(area)
+            self.scroll_atalhos.setGeometry(0, 0, area.width(), area.height())
+            self.atualizar_botoes_atalhos()
+
+        if hasattr(self, "gerenciador_modulos"):
+            self.gerenciador_modulos.notificar_area_pagina(
+                (area.x(), area.y(), area.width(), area.height())
+            )
 
     def _atualizar_dots_pagina(self):
         """Atualiza a cor das bolinhas conforme a página atual e o tema."""
@@ -541,10 +611,11 @@ class WidgetFrutigerAero(QWidget):
             dot.raise_()
 
     def _voltar_pagina_principal(self):
-        """Retorna à página 0 após inatividade."""
-        if self.pagina_atual != 0:
-            self.mudar_pagina("esq")
-            if self.pagina_atual != 0:
+        """Retorna à página principal após inatividade."""
+        pagina_principal = self._indice_pagina_principal()
+        if self.pagina_atual != pagina_principal:
+            self.mudar_pagina("dir")
+            if self.pagina_atual != pagina_principal:
                 QTimer.singleShot(300, self._voltar_pagina_principal)
 
     # ---- LÓGICA GERAL ----
@@ -735,7 +806,7 @@ class WidgetFrutigerAero(QWidget):
         self._atualizar_dots_pagina()
 
         # Timer de inatividade
-        if self.pagina_atual != 0 and config_app.voltar_pagina_principal:
+        if self.pagina_atual != self._indice_pagina_principal() and config_app.voltar_pagina_principal:
             self.timer_inatividade.start(15000)
         else:
             self.timer_inatividade.stop()

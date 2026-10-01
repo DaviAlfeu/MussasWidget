@@ -128,6 +128,10 @@ class PluginBase:
         """Chamado quando novos dados são baixados da planilha. Override se necessário."""
         pass
 
+    def ao_mudar_area_pagina(self, area):
+        """Chamado quando a área disponível das páginas muda."""
+        pass
+
 
 class GerenciadorModulos:
     def __init__(self, main_app):
@@ -182,3 +186,10 @@ class GerenciadorModulos:
                 plugin.ao_baixar_dados(*args)
             except Exception as e:
                 print(f"[Módulo] Erro em ao_baixar_dados de '{plugin.nome}': {e}")
+
+    def notificar_area_pagina(self, area):
+        for plugin in self.modulos_carregados:
+            try:
+                plugin.ao_mudar_area_pagina(area)
+            except Exception as e:
+                print(f"[Módulo] Erro em ao_mudar_area_pagina de '{plugin.nome}': {e}")

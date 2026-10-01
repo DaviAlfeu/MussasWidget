@@ -35,6 +35,8 @@ def alpha_desfoque(valor, alpha_min=30, alpha_max=225):
 def get_app_dir():
     if getattr(sys, 'frozen', False):
         return os.path.dirname(os.path.abspath(sys.executable))
+    if os.path.basename(os.path.dirname(os.path.abspath(__file__))).lower() == "src":
+        return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     return os.path.dirname(os.path.abspath(sys.argv[0]))
 
 def resource_path(filename):
