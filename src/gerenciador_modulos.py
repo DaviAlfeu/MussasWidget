@@ -48,7 +48,7 @@ def listar_modulos_github():
     if not isinstance(entradas, list):
         raise ValueError("A resposta do GitHub não contém uma lista de módulos.")
 
-    modulos = []
+    modulos_por_nome = {}
     for entrada in entradas:
         nome = entrada.get("name", "")
         url = entrada.get("download_url")
@@ -64,8 +64,50 @@ def listar_modulos_github():
                     versao = _extrair_versao_modulo(resposta_modulo.read())
             except Exception:
                 pass
-            modulos.append({"nome": nome, "url": url, "versao": versao})
-    return sorted(modulos, key=lambda modulo: modulo["nome"].lower())
+            modulos_por_nome[nome.casefold()] = {
+                "nome": nome,
+                "url": url,
+                "versao": versao,
+                "local": False
+            }
+
+    try:
+        with os.scandir(PASTA_MODULOS) as arquivos_locais:
+            for arquivo in arquivos_locais:
+                nome_arquivo = arquivo.name
+                desativado = nome_arquivo.endswith(".py.disabled")
+                nome = nome_arquivo[:-len(".disabled")] if desativado else nome_arquivo
+                if (not arquivo.is_file(follow_symlinks=False)
+                        or not nome.endswith(".py")
+                        or os.path.basename(nome) != nome):
+                    continue
+
+                chave = nome.casefold()
+                modulo = modulos_por_nome.get(chave)
+                if modulo is not None:
+                    modulo["local"] = True
+                    continue
+
+                versao = None
+                try:
+                    with open(arquivo.path, "rb") as arquivo_modulo:
+                        versao = _extrair_versao_modulo(arquivo_modulo.read())
+                except OSError:
+                    pass
+                modulos_por_nome[chave] = {
+                    "nome": nome,
+                    "url": None,
+                    "versao": versao,
+                    "local": True,
+                    "desativado": desativado
+                }
+    except OSError:
+        pass
+
+    return sorted(
+        modulos_por_nome.values(),
+        key=lambda modulo: modulo["nome"].casefold()
+    )
 
 
 def baixar_modulo_github(nome, url):

@@ -277,6 +277,12 @@ class JanelaConfiguracoes(QDialog):
                 )
         else:
             gerenciador.desativar_modulo(nome)
+            if acao == "excluir":
+                self._modulos_remotos = [
+                    modulo for modulo in self._modulos_remotos
+                    if modulo["nome"].casefold() != nome.casefold()
+                    or modulo.get("url") is not None
+                ]
         self._atualizar_paginas_principais()
         self._exibir_modulos(self._modulos_remotos)
         self.lbl_status_modulos.setText(f"{len(self._modulos_remotos)} módulo(s) disponível(is)")
@@ -351,7 +357,7 @@ class JanelaConfiguracoes(QDialog):
 
             botao_acao = QPushButton()
             botao_acao.setFixedSize(26, 26)
-            if estado == "nao_instalado":
+            if estado == "nao_instalado" and modulo.get("url"):
                 botao_acao.setIcon(
                     self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowDown)
                 )
@@ -359,7 +365,7 @@ class JanelaConfiguracoes(QDialog):
                 botao_acao.clicked.connect(
                     lambda checked=False, item=modulo: self.baixar_modulo(item)
                 )
-            else:
+            elif estado != "nao_instalado":
                 botao_acao.setIcon(
                     self.style().standardIcon(QStyle.StandardPixmap.SP_DialogCloseButton)
                 )
@@ -367,6 +373,9 @@ class JanelaConfiguracoes(QDialog):
                 botao_acao.clicked.connect(
                     lambda checked=False, item=modulo: self.alterar_modulo(item, "excluir")
                 )
+            else:
+                botao_acao.setEnabled(False)
+                botao_acao.setToolTip("Arquivo local indisponível")
             acoes.append(botao_acao)
             layout_linha.addWidget(botao_acao)
             self.layout_lista_modulos.addWidget(linha)
