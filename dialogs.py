@@ -14,6 +14,8 @@ from utils import (
     raio_desfoque, normalizar_cor_hex, aplicar_css_fonte_base, alpha_desfoque
 )
 from ui_components import BlurredBackgroundFrame, OutlineLabel, ClickableMes, ClickableLabel
+from gerenciador_modulos import PASTA_MODULOS, estado_modulo
+from workers import WorkerModulosGitHub
 
 class JanelaConfiguracoes(QDialog):
     def __init__(self, parent_widget):
@@ -31,6 +33,8 @@ class JanelaConfiguracoes(QDialog):
         layout_personalizacao = QVBoxLayout(pagina_personalizacao)
         pagina_gerais = QWidget()
         layout_gerais = QVBoxLayout(pagina_gerais)
+        pagina_modulos = QWidget()
+        layout_modulos = QVBoxLayout(pagina_modulos)
         
         self.check_tema = QCheckBox("Modo Claro")
         self.check_tema.setChecked(config_app.modo_claro)
@@ -95,6 +99,24 @@ class JanelaConfiguracoes(QDialog):
 
         self.btn_update = QPushButton("Verificar Atualizações")
         self.btn_update.clicked.connect(lambda: self.parent_widget.verificar_atualizacoes(manual=True))
+
+        layout_topo_modulos = QHBoxLayout()
+        self.lbl_status_modulos = QLabel("Carregando módulos do GitHub...")
+        self.btn_atualizar_lista_modulos = QPushButton("Atualizar lista")
+        layout_topo_modulos.addWidget(self.lbl_status_modulos, 1)
+        layout_topo_modulos.addWidget(self.btn_atualizar_lista_modulos)
+        self.scroll_modulos = QScrollArea()
+        self.scroll_modulos.setWidgetResizable(True)
+        self.conteudo_modulos = QWidget()
+        self.layout_lista_modulos = QVBoxLayout(self.conteudo_modulos)
+        self.layout_lista_modulos.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self.scroll_modulos.setWidget(self.conteudo_modulos)
+        layout_modulos.addLayout(layout_topo_modulos)
+        layout_modulos.addWidget(self.scroll_modulos)
+        self._botoes_modulos = {}
+        self._worker_modulos = None
+        self._operacao_modulos = "listar"
+        self.btn_atualizar_lista_modulos.clicked.connect(self.atualizar_lista_modulos)
         
         layout_personalizacao.addWidget(self.check_tema)
         layout_personalizacao.addSpacing(6)
@@ -120,6 +142,7 @@ class JanelaConfiguracoes(QDialog):
 
         abas.addTab(pagina_personalizacao, "Personalização")
         abas.addTab(pagina_gerais, "Gerais")
+        abas.addTab(pagina_modulos, "Módulos")
         
         self.check_tema.toggled.connect(self.atualizar_preview)
         self.combo_wp.currentTextChanged.connect(self.atualizar_preview)
@@ -127,6 +150,134 @@ class JanelaConfiguracoes(QDialog):
         self.slider_esp.valueChanged.connect(self.atualizar_preview)
         
         self.atualizar_preview()
+        self.atualizar_lista_modulos()
+
+    def atualizar_lista_modulos(self):
+        if self._worker_modulos is not None and self._worker_modulos.isRunning():
+            return
+        self._operacao_modulos = "listar"
+        self.lbl_status_modulos.setText("Consultando GitHub...")
+        self.btn_atualizar_lista_modulos.setEnabled(False)
+        self._iniciar_worker_modulos()
+
+    def baixar_modulo(self, modulo):
+        if self._worker_modulos is not None and self._worker_modulos.isRunning():
+            return
+        nome = modulo["nome"]
+        self._operacao_modulos = "baixar"
+        self.lbl_status_modulos.setText(f"Baixando {os.path.splitext(nome)[0]}...")
+        self._definir_botoes_modulos_habilitados(False)
+        self.btn_atualizar_lista_modulos.setEnabled(False)
+        self._iniciar_worker_modulos(nome, modulo["url"], "baixar")
+
+    def _iniciar_worker_modulos(self, nome=None, url=None, acao=None):
+        self._worker_modulos = WorkerModulosGitHub(nome, url, acao, self)
+        self._worker_modulos.resultado.connect(self._resultado_modulos)
+        self._worker_modulos.erro.connect(self._erro_modulos)
+        self._worker_modulos.finished.connect(self._finalizar_worker_modulos)
+        self._worker_modulos.start()
+
+    def _resultado_modulos(self, resultado):
+        if self._operacao_modulos == "listar":
+            self._exibir_modulos(resultado)
+            self.lbl_status_modulos.setText(f"{len(resultado)} módulo(s) disponível(is)")
+            return
+
+        nome = resultado["nome"]
+        acao = resultado["acao"]
+        rotulo = os.path.splitext(nome)[0]
+        mensagens = {
+            "baixar": f"{rotulo} foi baixado.",
+            "ativar": f"{rotulo} foi ativado.",
+            "desativar": f"{rotulo} foi desativado.",
+            "excluir": f"{rotulo} foi excluído."
+        }
+        self._exibir_modulos(self._modulos_remotos)
+        self.lbl_status_modulos.setText(f"{mensagens[acao]} Reinicie o aplicativo para aplicar.")
+
+    def _erro_modulos(self, mensagem):
+        self.lbl_status_modulos.setText("Não foi possível concluir a operação.")
+        if self._operacao_modulos != "listar":
+            self._exibir_modulos(self._modulos_remotos)
+        QMessageBox.warning(self, "Módulos do GitHub", mensagem)
+
+    def _finalizar_worker_modulos(self):
+        self.btn_atualizar_lista_modulos.setEnabled(True)
+        self._definir_botoes_modulos_habilitados(True)
+        self._worker_modulos = None
+
+    def _definir_botoes_modulos_habilitados(self, habilitado):
+        for acoes in self._botoes_modulos.values():
+            for botao in acoes:
+                botao.setEnabled(habilitado)
+
+    def _exibir_modulos(self, modulos):
+        self._modulos_remotos = modulos
+        while self.layout_lista_modulos.count():
+            item = self.layout_lista_modulos.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self._botoes_modulos.clear()
+
+        if not modulos:
+            self.layout_lista_modulos.addWidget(QLabel("Nenhum arquivo .py encontrado na pasta Modulos."))
+            return
+
+        for modulo in modulos:
+            linha = QWidget()
+            layout_linha = QHBoxLayout(linha)
+            layout_linha.setContentsMargins(0, 4, 0, 4)
+            nome = modulo["nome"]
+            rotulo = QLabel(os.path.splitext(nome)[0])
+            layout_linha.addWidget(rotulo, 1)
+            estado = estado_modulo(nome)
+            acoes = []
+            if estado == "nao_instalado":
+                botao = QPushButton("Baixar")
+                botao.clicked.connect(lambda checked=False, item=modulo: self.baixar_modulo(item))
+                acoes.append(botao)
+                layout_linha.addWidget(botao)
+            else:
+                if estado == "desativado":
+                    botao_estado = QPushButton("Ativar")
+                    acao_estado = "ativar"
+                else:
+                    botao_estado = QPushButton("Desativar")
+                    acao_estado = "desativar"
+                botao_estado.clicked.connect(
+                    lambda checked=False, item=modulo, acao=acao_estado:
+                    self.alterar_modulo(item, acao)
+                )
+                botao_excluir = QPushButton("Excluir")
+                botao_excluir.clicked.connect(
+                    lambda checked=False, item=modulo: self.alterar_modulo(item, "excluir")
+                )
+                acoes.extend((botao_estado, botao_excluir))
+                layout_linha.addWidget(botao_estado)
+                layout_linha.addWidget(botao_excluir)
+            self.layout_lista_modulos.addWidget(linha)
+            self._botoes_modulos[nome] = acoes
+
+    def alterar_modulo(self, modulo, acao):
+        if self._worker_modulos is not None and self._worker_modulos.isRunning():
+            return
+        nome = modulo["nome"]
+        if acao == "excluir":
+            resposta = QMessageBox.question(
+                self,
+                "Excluir módulo",
+                f"Deseja excluir o módulo {os.path.splitext(nome)[0]}?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No
+            )
+            if resposta != QMessageBox.StandardButton.Yes:
+                return
+        rotulo = os.path.splitext(nome)[0]
+        self._operacao_modulos = acao
+        self.lbl_status_modulos.setText(f"{acao.capitalize()} {rotulo}...")
+        self._definir_botoes_modulos_habilitados(False)
+        self.btn_atualizar_lista_modulos.setEnabled(False)
+        self._iniciar_worker_modulos(nome, modulo.get("url"), acao)
 
     def atualizar_label_tempo_parabens(self):
         self.lbl_tempo_parabens.setText(f"Duração da tela de Parabéns: {self.slider_tempo_parabens.value()}s")

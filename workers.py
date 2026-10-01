@@ -6,6 +6,41 @@ import codecs
 from PyQt6.QtCore import QThread, pyqtSignal
 from utils import parse_data_jogo_bg
 from config import URL_CSV_ANIVERSARIOS, URL_CSV_JOGO
+from gerenciador_modulos import (
+    alterar_estado_modulo, baixar_modulo_github, excluir_modulo,
+    listar_modulos_github
+)
+
+
+class WorkerModulosGitHub(QThread):
+    resultado = pyqtSignal(object)
+    erro = pyqtSignal(str)
+
+    def __init__(self, nome=None, url=None, acao=None, parent=None):
+        super().__init__(parent)
+        self.nome = nome
+        self.url = url
+        self.acao = acao
+
+    def run(self):
+        try:
+            if self.nome is None:
+                resultado = listar_modulos_github()
+            elif self.acao == "baixar":
+                resultado = baixar_modulo_github(self.nome, self.url)
+            elif self.acao == "ativar":
+                resultado = alterar_estado_modulo(self.nome, True)
+            elif self.acao == "desativar":
+                resultado = alterar_estado_modulo(self.nome, False)
+            elif self.acao == "excluir":
+                resultado = excluir_modulo(self.nome)
+            else:
+                raise ValueError("Ação de módulo inválida.")
+            if self.nome is not None:
+                resultado = {"nome": resultado, "acao": self.acao}
+            self.resultado.emit(resultado)
+        except Exception as erro:
+            self.erro.emit(str(erro))
 
 class WorkerDownload(QThread):
     resultado = pyqtSignal(list, list, object, object, bytes, bytes)
