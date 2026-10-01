@@ -7,6 +7,8 @@ a = Analysis(
     binaries=[],
     datas=[('assets', 'assets'), ('Fonts', 'Fonts')],
     hiddenimports=[
+        'PyQt6.QtMultimedia',
+        'webbrowser',
         'winrt.system',
         'winrt.windows.foundation',
         'winrt.windows.foundation.collections',

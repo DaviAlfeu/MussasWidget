@@ -272,8 +272,12 @@ class JanelaConfiguracoes(QDialog):
         gerenciador = self.parent_widget.gerenciador_modulos
         if acao in ("baixar", "ativar"):
             if not gerenciador.ativar_modulo(nome):
+                detalhe = gerenciador.ultimo_erro_ativacao
+                texto_erro = f"Não foi possível carregar {os.path.splitext(nome)[0]}."
+                if detalhe:
+                    texto_erro += f"\n\nDetalhes: {detalhe}"
                 QMessageBox.warning(
-                    self, "Módulos", f"Não foi possível carregar {os.path.splitext(nome)[0]}."
+                    self, "Módulos", texto_erro
                 )
         else:
             gerenciador.desativar_modulo(nome)

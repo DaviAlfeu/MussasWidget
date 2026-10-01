@@ -218,6 +218,7 @@ class GerenciadorModulos:
         self.main_app = main_app
         self.modulos_carregados = []
         self._registros_modulos = {}
+        self.ultimo_erro_ativacao = None
 
     def carregar_modulos(self):
         """Varre a pasta de módulos e carrega plugins."""
@@ -227,6 +228,7 @@ class GerenciadorModulos:
             self.ativar_modulo(arquivo)
 
     def ativar_modulo(self, arquivo):
+        self.ultimo_erro_ativacao = None
         if (not isinstance(arquivo, str) or not arquivo.endswith(".py")
                 or os.path.basename(arquivo) != arquivo):
             raise ValueError("Nome de módulo inválido.")
@@ -235,6 +237,7 @@ class GerenciadorModulos:
 
         caminho = os.path.join(PASTA_MODULOS, arquivo)
         if not os.path.isfile(caminho):
+            self.ultimo_erro_ativacao = f"Arquivo não encontrado: {caminho}"
             return False
 
         nome_modulo = arquivo[:-3]
@@ -247,6 +250,7 @@ class GerenciadorModulos:
             modulo = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(modulo)
             if not hasattr(modulo, "Plugin"):
+                self.ultimo_erro_ativacao = "O arquivo não define uma classe Plugin."
                 return False
 
             plugin = modulo.Plugin(self.main_app)
@@ -270,6 +274,7 @@ class GerenciadorModulos:
             print(f"[Módulo] '{plugin.nome}' v{plugin.versao} carregado.")
             return True
         except Exception as erro:
+            self.ultimo_erro_ativacao = f"{type(erro).__name__}: {erro}"
             print(f"[Módulo] Erro ao carregar '{nome_modulo}': {erro}")
             return False
 
