@@ -224,6 +224,12 @@ class WidgetFrutigerAero(QWidget):
         self.timer_hover = QTimer(self)
         self.timer_hover.timeout.connect(self.verificar_hover_bordas)
         self.timer_hover.start(100)
+        self._cursor_dentro_widget = False
+        self._bolinhas_visiveis = False
+        self.timer_ocultar_bolinhas = QTimer(self)
+        self.timer_ocultar_bolinhas.setSingleShot(True)
+        self.timer_ocultar_bolinhas.setInterval(10000)
+        self.timer_ocultar_bolinhas.timeout.connect(self._ocultar_bolinhas)
 
         if config_app.pos_x is not None and config_app.pos_y is not None: self.move(config_app.pos_x, config_app.pos_y)
         else:
@@ -572,7 +578,7 @@ class WidgetFrutigerAero(QWidget):
             else:
                 dot.move(x_base, y_base + i * (DOT_SIZE + DOT_SPACING))
             dot.raise_()
-            dot.show()
+            dot.setVisible(self._bolinhas_visiveis)
             self.dots.append(dot)
 
         self._aplicar_area_segura_paginas()
@@ -584,7 +590,6 @@ class WidgetFrutigerAero(QWidget):
 
     def _aplicar_area_segura_paginas(self):
         area = self._area_segura_pagina()
-        self.container.setGeometry(self.pages_container.geometry())
         for pagina in self.paginas:
             pagina.setProperty("mussas_safe_area", area)
             pagina.setMask(QRegion(area))
@@ -624,7 +629,10 @@ class WidgetFrutigerAero(QWidget):
         flags = self.windowFlags()
         if config_app.sempre_no_topo: flags |= Qt.WindowType.WindowStaysOnTopHint
         else: flags &= ~Qt.WindowType.WindowStaysOnTopHint
+        if flags == self.windowFlags():
+            return
         self.setWindowFlags(flags)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.show()
 
     def cores_botoes(self):
@@ -753,6 +761,11 @@ class WidgetFrutigerAero(QWidget):
 
     def verificar_hover_bordas(self):
         pos = self.mapFromGlobal(QCursor.pos())
+        cursor_dentro = self.rect().contains(pos)
+        if cursor_dentro and not self._cursor_dentro_widget:
+            self._mostrar_bolinhas()
+        self._cursor_dentro_widget = cursor_dentro
+
         y_min = 26
         if 0 <= pos.x() <= 24 and y_min <= pos.y() <= self.height(): self.btn_nav_esq.show()
         else: self.btn_nav_esq.hide()
@@ -761,6 +774,18 @@ class WidgetFrutigerAero(QWidget):
         
         if self.top_expanded and 24 <= pos.x() <= 174 and 0 <= pos.y() <= self.top_extra:
             self.timer_autoclose.start(10000)
+
+    def _mostrar_bolinhas(self):
+        self._bolinhas_visiveis = True
+        for dot in getattr(self, "dots", []):
+            dot.show()
+            dot.raise_()
+        self.timer_ocultar_bolinhas.start()
+
+    def _ocultar_bolinhas(self):
+        self._bolinhas_visiveis = False
+        for dot in getattr(self, "dots", []):
+            dot.hide()
 
     def mudar_pagina(self, direcao):
         if self.anim_group and self.anim_group.state() == QAbstractAnimation.State.Running: return

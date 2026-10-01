@@ -38,6 +38,7 @@ class Plugin(PluginBase):
 
     def __init__(self, app):
         super().__init__(app)
+        self._encerrando = False
 
         # Estado interno
         self.dados_planilha = []
@@ -210,6 +211,22 @@ class Plugin(PluginBase):
             y_botao, tamanho_botao, tamanho_botao
         )
 
+    def encerrar(self):
+        self._encerrando = True
+        for nome in (
+            "timer_jogo", "timer_skip", "pulse_timer", "timer_internet",
+            "timer_tela", "timer_calendario_autoclose"
+        ):
+            timer = getattr(self, nome, None)
+            if timer is not None:
+                timer.stop()
+        if self.animacao_parabens is not None:
+            self.animacao_parabens.stop()
+        self.player.stop()
+        if self.janela_calendario is not None:
+            self.janela_calendario.hide()
+        return not (hasattr(self, "_worker") and self._worker.isRunning())
+
     def botoes_topo(self):
         return [
             {"nome_png": "refresh.png", "texto_fallback": "🔄", "callback": self.baixar_dados, "posicao": 0},
@@ -258,6 +275,8 @@ class Plugin(PluginBase):
     # ---- Downloads ----
 
     def baixar_dados(self):
+        if self._encerrando:
+            return
         if hasattr(self, '_worker') and self._worker.isRunning():
             return
         self._worker = WorkerDownload()
@@ -265,6 +284,8 @@ class Plugin(PluginBase):
         self._worker.start()
 
     def _processar_dados(self, plan, jogo, data_ini, data_fim, img1, img2):
+        if self._encerrando:
+            return
         self.dados_planilha = plan
         self.dados_jogo = jogo
         self.data_inicio_jogo = data_ini
@@ -283,7 +304,7 @@ class Plugin(PluginBase):
             return
         pix = QPixmap()
         pix.loadFromData(dados_bytes)
-        label.setPixmap(pix.scaled(65, 65, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+        label.setPixmap(pix.scaled(48, 48, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
 
     # ---- Timer Jogo ----
 
@@ -328,11 +349,13 @@ class Plugin(PluginBase):
         self.atualizar_interface_aniversario()
 
     def liberar_animacao_aniversario(self):
+        if self._encerrando:
+            return
         self.aniversario_animacao_pronta = True
         self.atualizar_interface_aniversario()
 
     def iniciar_animacao_parabens(self):
-        if self.aniversario_animacao_executada:
+        if self._encerrando or self.aniversario_animacao_executada:
             return
         self.aniversario_animacao_executada = True
         pos_nome_final = QPoint(10, 16)

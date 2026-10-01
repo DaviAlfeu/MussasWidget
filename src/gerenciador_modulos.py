@@ -3,6 +3,8 @@ import importlib.util
 import json
 import tempfile
 import urllib.request
+from PyQt6.QtCore import QThread, QTimer
+from PyQt6.QtMultimedia import QMediaPlayer
 from config import APPDATA_DIR
 
 PASTA_MODULOS = os.path.join(APPDATA_DIR, "Modulos")
@@ -132,31 +134,148 @@ class PluginBase:
         """Chamado quando a área disponível das páginas muda."""
         pass
 
+    def encerrar(self):
+        """Libera recursos do plugin antes de removê-lo do aplicativo."""
+        return True
+
 
 class GerenciadorModulos:
     def __init__(self, main_app):
         self.main_app = main_app
         self.modulos_carregados = []
+        self._registros_modulos = {}
 
     def carregar_modulos(self):
         """Varre a pasta de módulos e carrega plugins."""
         for arquivo in sorted(os.listdir(PASTA_MODULOS)):
             if not arquivo.endswith('.py'):
                 continue
-            caminho = os.path.join(PASTA_MODULOS, arquivo)
-            nome_modulo = arquivo[:-3]
-            try:
-                spec = importlib.util.spec_from_file_location(nome_modulo, caminho)
-                modulo = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(modulo)
+            self.ativar_modulo(arquivo)
 
-                if hasattr(modulo, 'Plugin'):
-                    plugin = modulo.Plugin(self.main_app)
-                    self._registrar_plugin(plugin)
-                    self.modulos_carregados.append(plugin)
-                    print(f"[Módulo] '{plugin.nome}' v{plugin.versao} carregado.")
-            except Exception as e:
-                print(f"[Módulo] Erro ao carregar '{nome_modulo}': {e}")
+    def ativar_modulo(self, arquivo):
+        if (not isinstance(arquivo, str) or not arquivo.endswith(".py")
+                or os.path.basename(arquivo) != arquivo):
+            raise ValueError("Nome de módulo inválido.")
+        if arquivo in self._registros_modulos:
+            return True
+
+        caminho = os.path.join(PASTA_MODULOS, arquivo)
+        if not os.path.isfile(caminho):
+            return False
+
+        nome_modulo = arquivo[:-3]
+        paginas_antes = set(self.main_app.paginas)
+        botoes_antes = self._botoes_topo_atuais()
+        try:
+            spec = importlib.util.spec_from_file_location(nome_modulo, caminho)
+            if spec is None or spec.loader is None:
+                raise ImportError(f"Não foi possível carregar {arquivo}.")
+            modulo = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(modulo)
+            if not hasattr(modulo, "Plugin"):
+                return False
+
+            plugin = modulo.Plugin(self.main_app)
+            self._registrar_plugin(plugin)
+            paginas = [pagina for pagina in self.main_app.paginas if pagina not in paginas_antes]
+            botoes = [botao for botao in self._botoes_topo_atuais() if botao not in botoes_antes]
+            self.modulos_carregados.append(plugin)
+            self._registros_modulos[arquivo] = {
+                "plugin": plugin,
+                "paginas": paginas,
+                "botoes": botoes,
+                "encerrando": False
+            }
+            self.main_app._aplicar_area_segura_paginas()
+            self.main_app._criar_dots_pagina()
+            self.main_app.posicionar_elementos()
+            print(f"[Módulo] '{plugin.nome}' v{plugin.versao} carregado.")
+            return True
+        except Exception as erro:
+            print(f"[Módulo] Erro ao carregar '{nome_modulo}': {erro}")
+            return False
+
+    def desativar_modulo(self, arquivo):
+        registro = self._registros_modulos.get(arquivo)
+        if registro is None:
+            return True
+
+        plugin = registro["plugin"]
+        if not registro["encerrando"]:
+            registro["encerrando"] = True
+            plugin._encerrando = True
+            try:
+                plugin.encerrar()
+            except Exception as erro:
+                print(f"[Módulo] Erro ao encerrar '{plugin.nome}': {erro}")
+
+            for recurso in vars(plugin).values():
+                if isinstance(recurso, QTimer):
+                    recurso.stop()
+                elif isinstance(recurso, QMediaPlayer):
+                    recurso.stop()
+
+            calendario = getattr(plugin, "janela_calendario", None)
+            if calendario is not None:
+                calendario.hide()
+                calendario.deleteLater()
+                if getattr(self.main_app, "janela_calendario", None) is calendario:
+                    self.main_app.janela_calendario = None
+                    self.main_app.calendario_aberto = False
+
+        workers_ativos = [
+            recurso for recurso in vars(plugin).values()
+            if isinstance(recurso, QThread) and recurso.isRunning()
+        ]
+        if workers_ativos:
+            QTimer.singleShot(150, lambda: self.desativar_modulo(arquivo))
+            return False
+
+        pagina_atual = (
+            self.main_app.paginas[self.main_app.pagina_atual]
+            if self.main_app.paginas else None
+        )
+        animacao = getattr(self.main_app, "anim_group", None)
+        if animacao is not None:
+            animacao.stop()
+
+        paginas_removidas = registro["paginas"]
+        for pagina in paginas_removidas:
+            if pagina in self.main_app.paginas:
+                self.main_app.paginas.remove(pagina)
+            pagina.hide()
+            pagina.setParent(None)
+            pagina.deleteLater()
+
+        for botao in registro["botoes"]:
+            self.main_app.top_layout.removeWidget(botao)
+            botao.hide()
+            botao.deleteLater()
+
+        if plugin in self.modulos_carregados:
+            self.modulos_carregados.remove(plugin)
+        del self._registros_modulos[arquivo]
+
+        if pagina_atual in self.main_app.paginas:
+            self.main_app.pagina_atual = self.main_app.paginas.index(pagina_atual)
+        else:
+            self.main_app.pagina_atual = self.main_app._indice_pagina_principal()
+
+        self.main_app._posicao_botoes_modulos = max(
+            0, self.main_app.top_layout.indexOf(self.main_app.btn_config)
+        )
+        self.main_app._criar_dots_pagina()
+        self.main_app.posicionar_elementos()
+        self.main_app.aplicar_tema()
+        return True
+
+    def _botoes_topo_atuais(self):
+        botoes = []
+        for indice in range(self.main_app.top_layout.count()):
+            botao = self.main_app.top_layout.itemAt(indice).widget()
+            if botao is not None:
+                botoes.append(botao)
+        return botoes
 
     def _registrar_plugin(self, plugin):
         """Registra página e botões de um plugin no app principal."""

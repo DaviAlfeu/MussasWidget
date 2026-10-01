@@ -2,7 +2,8 @@ import os
 import sys
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QCheckBox, QLabel, QSlider, QHBoxLayout, 
-    QPushButton, QComboBox, QWidget, QStackedWidget, QGridLayout, QScrollArea, QApplication, QMessageBox, QInputDialog, QTabWidget
+    QPushButton, QComboBox, QWidget, QStackedWidget, QGridLayout, QScrollArea,
+    QApplication, QMessageBox, QInputDialog, QTabWidget, QStyle
 )
 from PyQt6.QtCore import Qt, QEvent
 from PyQt6.QtGui import QColor, QPainter
@@ -165,8 +166,11 @@ class JanelaConfiguracoes(QDialog):
         layout_topo_modulos = QHBoxLayout()
         self.lbl_status_modulos = QLabel("Carregando módulos do GitHub...")
         self.btn_atualizar_lista_modulos = QPushButton("Atualizar lista")
+        self.btn_abrir_pasta_modulos = QPushButton("Abrir pasta")
+        self.btn_abrir_pasta_modulos.clicked.connect(self.abrir_pasta_modulos)
         layout_topo_modulos.addWidget(self.lbl_status_modulos, 1)
         layout_topo_modulos.addWidget(self.btn_atualizar_lista_modulos)
+        layout_topo_modulos.addWidget(self.btn_abrir_pasta_modulos)
         self.scroll_modulos = QScrollArea()
         self.scroll_modulos.setWidgetResizable(True)
         self.conteudo_modulos = QWidget()
@@ -264,15 +268,27 @@ class JanelaConfiguracoes(QDialog):
 
         nome = resultado["nome"]
         acao = resultado["acao"]
-        rotulo = os.path.splitext(nome)[0]
-        mensagens = {
-            "baixar": f"{rotulo} foi baixado.",
-            "ativar": f"{rotulo} foi ativado.",
-            "desativar": f"{rotulo} foi desativado.",
-            "excluir": f"{rotulo} foi excluído."
-        }
+        gerenciador = self.parent_widget.gerenciador_modulos
+        if acao in ("baixar", "ativar"):
+            if not gerenciador.ativar_modulo(nome):
+                QMessageBox.warning(
+                    self, "Módulos", f"Não foi possível carregar {os.path.splitext(nome)[0]}."
+                )
+        else:
+            gerenciador.desativar_modulo(nome)
+        self._atualizar_paginas_principais()
         self._exibir_modulos(self._modulos_remotos)
-        self.lbl_status_modulos.setText(f"{mensagens[acao]} Reinicie o aplicativo para aplicar.")
+        self.lbl_status_modulos.setText(f"{len(self._modulos_remotos)} módulo(s) disponível(is)")
+
+    def _atualizar_paginas_principais(self):
+        selecao = self.combo_pagina_principal.currentData()
+        self.combo_pagina_principal.clear()
+        for nome_pagina, chave_pagina in self.parent_widget.paginas_disponiveis():
+            self.combo_pagina_principal.addItem(nome_pagina, chave_pagina)
+        indice = self.combo_pagina_principal.findData(selecao)
+        if indice < 0:
+            indice = self.combo_pagina_principal.findData(config_app.pagina_principal)
+        self.combo_pagina_principal.setCurrentIndex(max(0, indice))
 
     def _erro_modulos(self, mensagem):
         self.lbl_status_modulos.setText("Não foi possível concluir a operação.")
@@ -287,8 +303,13 @@ class JanelaConfiguracoes(QDialog):
 
     def _definir_botoes_modulos_habilitados(self, habilitado):
         for acoes in self._botoes_modulos.values():
-            for botao in acoes:
-                botao.setEnabled(habilitado)
+            for controle in acoes:
+                controle.setEnabled(
+                    habilitado and not controle.property("desabilitado_por_estado")
+                )
+
+    def abrir_pasta_modulos(self):
+        os.startfile(PASTA_MODULOS)
 
     def _exibir_modulos(self, modulos):
         self._modulos_remotos = modulos
@@ -311,29 +332,38 @@ class JanelaConfiguracoes(QDialog):
             layout_linha.addWidget(rotulo, 1)
             estado = estado_modulo(nome)
             acoes = []
+            check_ativo = QCheckBox()
+            check_ativo.setChecked(estado == "ativo")
+            check_ativo.setToolTip("Módulo ativo" if estado == "ativo" else "Ativar módulo")
+            check_ativo.setProperty("desabilitado_por_estado", estado == "nao_instalado")
+            check_ativo.setEnabled(estado != "nao_instalado")
+            check_ativo.toggled.connect(
+                lambda ativo, item=modulo:
+                self.alterar_modulo(item, "ativar" if ativo else "desativar")
+            )
+            layout_linha.addWidget(check_ativo)
+            acoes.append(check_ativo)
+
+            botao_acao = QPushButton()
+            botao_acao.setFixedSize(26, 26)
             if estado == "nao_instalado":
-                botao = QPushButton("Baixar")
-                botao.clicked.connect(lambda checked=False, item=modulo: self.baixar_modulo(item))
-                acoes.append(botao)
-                layout_linha.addWidget(botao)
-            else:
-                if estado == "desativado":
-                    botao_estado = QPushButton("Ativar")
-                    acao_estado = "ativar"
-                else:
-                    botao_estado = QPushButton("Desativar")
-                    acao_estado = "desativar"
-                botao_estado.clicked.connect(
-                    lambda checked=False, item=modulo, acao=acao_estado:
-                    self.alterar_modulo(item, acao)
+                botao_acao.setIcon(
+                    self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowDown)
                 )
-                botao_excluir = QPushButton("Excluir")
-                botao_excluir.clicked.connect(
+                botao_acao.setToolTip("Baixar módulo")
+                botao_acao.clicked.connect(
+                    lambda checked=False, item=modulo: self.baixar_modulo(item)
+                )
+            else:
+                botao_acao.setIcon(
+                    self.style().standardIcon(QStyle.StandardPixmap.SP_DialogCloseButton)
+                )
+                botao_acao.setToolTip("Excluir módulo")
+                botao_acao.clicked.connect(
                     lambda checked=False, item=modulo: self.alterar_modulo(item, "excluir")
                 )
-                acoes.extend((botao_estado, botao_excluir))
-                layout_linha.addWidget(botao_estado)
-                layout_linha.addWidget(botao_excluir)
+            acoes.append(botao_acao)
+            layout_linha.addWidget(botao_acao)
             self.layout_lista_modulos.addWidget(linha)
             self._botoes_modulos[nome] = acoes
 
