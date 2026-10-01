@@ -1,14 +1,20 @@
 import asyncio
+import time
 
-from PyQt6.QtCore import QThread, QTimer, Qt, QSize, pyqtSignal
-from PyQt6.QtGui import QPixmap
+from PyQt6.QtCore import (
+    QEvent, QObject, QPoint, QPropertyAnimation, QRectF, QThread, QTimer, Qt, QSize,
+    QEasingCurve, pyqtSignal
+)
+from PyQt6.QtGui import QPainter, QPainterPath, QPixmap
 from PyQt6.QtWidgets import (
-    QApplication, QComboBox, QHBoxLayout, QLabel, QPushButton, QStyle,
+    QApplication, QComboBox, QGraphicsOpacityEffect, QHBoxLayout,
+    QLabel, QListWidget, QPushButton, QSlider, QStackedWidget, QStyle,
     QVBoxLayout, QWidget
 )
 
-from config import MARGEM_AREA_ICONES
+from utils import aplicar_css_fonte_base
 from gerenciador_modulos import PluginBase
+from ui_components import BlurredBackgroundFrame, ClickableLabel
 
 try:
     from winrt.windows.media.control import GlobalSystemMediaTransportControlsSessionManager
@@ -21,15 +27,38 @@ else:
     ERRO_WINRT = ""
 
 
+class CapaMusicaLabel(ClickableLabel):
+    def paintEvent(self, evento):
+        pixmap = self.pixmap()
+        if pixmap is None or pixmap.isNull():
+            super().paintEvent(evento)
+            return
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        caminho = QPainterPath()
+        caminho.addRoundedRect(QRectF(self.rect().adjusted(0, 0, -1, -1)), 8, 8)
+        painter.setClipPath(caminho)
+        imagem = pixmap.scaled(
+            self.size(), Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+            Qt.TransformationMode.SmoothTransformation
+        )
+        x = (imagem.width() - self.width()) // 2
+        y = (imagem.height() - self.height()) // 2
+        painter.drawPixmap(-x, -y, imagem)
+
+
 class WorkerSessoesMedia(QThread):
     sessoes_carregadas = pyqtSignal(object)
     comando_concluido = pyqtSignal(bool)
     erro = pyqtSignal(str)
 
-    def __init__(self, comando=None, chave_sessao=None, parent=None):
+    def __init__(self, comando=None, chave_sessao=None, valor=None, parent=None):
         super().__init__(parent)
         self.comando = comando
         self.chave_sessao = chave_sessao
+        self.valor = valor
 
     def run(self):
         try:
@@ -49,6 +78,30 @@ class WorkerSessoesMedia(QThread):
 
         manager = await GlobalSystemMediaTransportControlsSessionManager.request_async()
         sessoes = list(manager.get_sessions())
+        if self.comando is not None:
+            sessao_alvo = await self._localizar_sessao(sessoes)
+            if sessao_alvo is None:
+                return False
+            if self.comando == "buscar":
+                linha_tempo = sessao_alvo.get_timeline_properties()
+                inicio = self._segundos(linha_tempo.start_time)
+                minimo = self._segundos(linha_tempo.min_seek_time)
+                maximo = self._segundos(linha_tempo.max_seek_time)
+                posicao = max(minimo, min(maximo, inicio + int(self.valor)))
+                return await sessao_alvo.try_change_playback_position_async(
+                    posicao * 10_000_000
+                )
+            acoes = {
+                "alternar": sessao_alvo.try_toggle_play_pause_async,
+                "anterior": sessao_alvo.try_skip_previous_async,
+                "proxima": sessao_alvo.try_skip_next_async,
+                "aleatorio": lambda: sessao_alvo.try_change_shuffle_active_async(
+                    bool(self.valor)
+                )
+            }
+            operacao = acoes.get(self.comando)
+            return await operacao() if operacao is not None else False
+
         atual = manager.get_current_session()
         ocorrencias = {}
         registros = []
@@ -64,6 +117,27 @@ class WorkerSessoesMedia(QThread):
                 ocorrencias[base] = ocorrencia + 1
                 chave = base + (ocorrencia,)
                 controles = sessao.get_playback_info().controls
+                info_reproducao = sessao.get_playback_info()
+                try:
+                    linha_tempo = sessao.get_timeline_properties()
+                    inicio = self._segundos(linha_tempo.start_time)
+                    fim = self._segundos(linha_tempo.end_time)
+                    posicao = self._segundos(linha_tempo.position) - inicio
+                    duracao = max(0, fim - inicio)
+                    pode_buscar = fim > inicio and (
+                        self._segundos(linha_tempo.max_seek_time)
+                        > self._segundos(linha_tempo.min_seek_time)
+                    )
+                except Exception:
+                    inicio = 0
+                    posicao = 0
+                    duracao = 0
+                    pode_buscar = False
+                identificador = fonte.lower()
+                fonte_musical = any(
+                    termo in identificador
+                    for termo in ("spotify", "youtube", "soundcloud", "chrome", "msedge", "edge")
+                )
                 imagem = (
                     await self._ler_thumbnail(propriedades.thumbnail)
                     if self.comando is None else b""
@@ -78,24 +152,28 @@ class WorkerSessoesMedia(QThread):
                     "pode_alternar": controles.is_play_pause_toggle_enabled,
                     "pode_anterior": controles.is_previous_enabled,
                     "pode_proxima": controles.is_next_enabled,
+                    "posicao": max(0, posicao),
+                    "duracao": duracao,
+                    "inicio": inicio,
+                    "pode_buscar": pode_buscar,
+                    "pode_aleatorio": (
+                        fonte_musical and controles.is_shuffle_enabled
+                    ),
+                    "aleatorio": info_reproducao.is_shuffle_active,
                     "atual": sessao == atual
                 })
             except Exception:
                 continue
 
-        if self.comando is None:
-            return registros
+        return registros
 
-        registro = next(
-            (item for item in registros if item["chave"] == self.chave_sessao), None
-        )
-        if registro is None:
-            return False
-
-        sessao_alvo = None
-        ocorrencias.clear()
+    async def _localizar_sessao(self, sessoes):
+        ocorrencias = {}
         for sessao in sessoes:
-            propriedades = await sessao.try_get_media_properties_async()
+            try:
+                propriedades = await sessao.try_get_media_properties_async()
+            except Exception:
+                continue
             fonte = sessao.source_app_user_model_id or "Aplicativo"
             titulo = propriedades.title or "Sem título"
             artista = propriedades.artist or propriedades.album_artist or ""
@@ -103,20 +181,14 @@ class WorkerSessoesMedia(QThread):
             ocorrencia = ocorrencias.get(base, 0)
             ocorrencias[base] = ocorrencia + 1
             if base + (ocorrencia,) == self.chave_sessao:
-                sessao_alvo = sessao
-                break
+                return sessao
+        return None
 
-        if sessao_alvo is None:
-            return False
-        acoes = {
-            "alternar": sessao_alvo.try_toggle_play_pause_async,
-            "anterior": sessao_alvo.try_skip_previous_async,
-            "proxima": sessao_alvo.try_skip_next_async
-        }
-        operacao = acoes.get(self.comando)
-        if operacao is None:
-            return False
-        return await operacao()
+    @staticmethod
+    def _segundos(valor):
+        if hasattr(valor, "total_seconds"):
+            return int(valor.total_seconds())
+        return int(valor / 10_000_000)
 
     async def _ler_thumbnail(self, referencia):
         if referencia is None or DataReader is None:
@@ -137,9 +209,38 @@ class WorkerSessoesMedia(QThread):
             return b""
 
 
+class FiltroJanelaMusica(QObject):
+    def __init__(self, plugin):
+        super().__init__(plugin.app)
+        self.plugin = plugin
+        self.playlist_viewport = plugin.lista_playlist.viewport()
+
+    def eventFilter(self, observado, evento):
+        plugin = self.plugin
+        tipo = evento.type()
+        if observado is plugin.app:
+            if tipo in (QEvent.Type.Move, QEvent.Type.Resize):
+                plugin._posicionar_widgets()
+            elif tipo == QEvent.Type.Show and not plugin._overlay_oculto:
+                plugin._mostrar_overlay()
+            elif tipo == QEvent.Type.Hide:
+                plugin._animacao_capa.stop()
+                plugin.painel_capa.hide()
+        elif observado is plugin.app.container:
+            if tipo in (QEvent.Type.Move, QEvent.Type.Resize):
+                plugin._posicionar_widgets()
+        elif observado is self.playlist_viewport:
+            if tipo in (
+                QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonDblClick,
+                QEvent.Type.Wheel, QEvent.Type.KeyPress
+            ):
+                plugin._interacao_playlist()
+        return False
+
+
 class Plugin(PluginBase):
     nome = "Música"
-    versao = "0.0.1"
+    versao = "0.1.0"
 
     def __init__(self, app):
         super().__init__(app)
@@ -147,76 +248,208 @@ class Plugin(PluginBase):
         self._worker = None
         self._atualizar_pendente = False
         self._sessoes = []
+        self._arrastando_progresso = False
+        self._posicao_base = 0
+        self._inicio_relogio = time.monotonic()
+        self._tocando = False
+        self._imagem_capa = QPixmap()
+        self._overlay_oculto = True
+        self._retorno_capa_apos_fade = False
+        self._seek_pendente = False
+        self._comando_pendente = None
+        self._comando_em_execucao = None
 
         self.page = QWidget(app.pages_container)
         self.page.setGeometry(0, 0, 150, 150)
         self.page.hide()
-
         self.conteudo = QWidget(self.page)
         layout = QVBoxLayout(self.conteudo)
-        layout.setContentsMargins(5, 4, 5, 4)
-        layout.setSpacing(2)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(1)
+
+        flags = Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint
+        self.painel_capa = BlurredBackgroundFrame(app)
+        self.painel_capa.setWindowFlags(flags)
+        self.painel_capa.setObjectName("painelCapaMusica")
+        self.painel_capa.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.painel_capa.setFixedSize(150, 150)
+        layout_capa = QVBoxLayout(self.painel_capa)
+        layout_capa.setContentsMargins(7, 7, 7, 7)
+        layout_capa.setSpacing(2)
+
+        self.pilha_capa = QStackedWidget()
+        self.pagina_capa = QWidget()
+        layout_imagem = QVBoxLayout(self.pagina_capa)
+        layout_imagem.setContentsMargins(0, 0, 0, 0)
+        layout_imagem.setSpacing(2)
+
+        self.capa = CapaMusicaLabel("♪", self.painel_capa)
+        self.capa.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.capa.setStyleSheet(
+            "background: rgba(255, 255, 255, 35); border-radius: 4px;"
+        )
+        self.capa.clicked.connect(self._mostrar_playlist)
+        layout_imagem.addWidget(self.capa, 1)
+
+        linha_progresso = QHBoxLayout()
+        linha_progresso.setContentsMargins(0, 0, 0, 0)
+        linha_progresso.setSpacing(3)
+        self.tempo_atual = QLabel("0:00")
+        self.tempo_total = QLabel("0:00")
+        self.tempo_atual.setMinimumWidth(42)
+        self.tempo_total.setMinimumWidth(42)
+        self.tempo_total.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        self.progresso = QSlider(Qt.Orientation.Horizontal)
+        self.progresso.setRange(0, 0)
+        self.progresso.setFixedHeight(12)
+        self.progresso.sliderPressed.connect(self._iniciar_arrasto)
+        self.progresso.sliderReleased.connect(self._confirmar_busca)
+        linha_progresso.addWidget(self.progresso, 1)
+        tempos = QHBoxLayout()
+        tempos.setContentsMargins(0, 0, 0, 0)
+        tempos.addWidget(self.tempo_atual)
+        tempos.addStretch()
+        tempos.addWidget(self.tempo_total)
+        layout_imagem.addLayout(linha_progresso)
+        layout_imagem.addLayout(tempos)
+
+        self.pagina_playlist = QWidget()
+        layout_playlist = QVBoxLayout(self.pagina_playlist)
+        layout_playlist.setContentsMargins(2, 2, 2, 2)
+        layout_playlist.setSpacing(2)
+        self.lista_playlist = QListWidget()
+        self.lista_playlist.setStyleSheet(
+            "QListWidget { background: transparent; border: none; }"
+        )
+        self.estado_playlist = QLabel(
+            "A fila não está disponível nesta sessão."
+        )
+        self.estado_playlist.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.estado_playlist.setWordWrap(True)
+        layout_playlist.addWidget(self.lista_playlist, 1)
+        layout_playlist.addWidget(self.estado_playlist)
+
+        self.pilha_capa.addWidget(self.pagina_capa)
+        self.pilha_capa.addWidget(self.pagina_playlist)
+        layout_capa.addWidget(self.pilha_capa)
+        self.pilha_capa.setCurrentWidget(self.pagina_capa)
+
+        self._animacao_capa = QPropertyAnimation(
+            self.painel_capa, b"windowOpacity", self.app
+        )
+        self._animacao_capa.setDuration(180)
+        self._animacao_capa.setEasingCurve(QEasingCurve.Type.InOutQuad)
+        self._animacao_capa.finished.connect(self._fim_animacao_capa)
+        self.timer_playlist = QTimer(self.app)
+        self.timer_playlist.setSingleShot(True)
+        self.timer_playlist.setInterval(10_000)
+        self.timer_playlist.timeout.connect(self._voltar_capa)
+        self.timer_ocultar_overlay = QTimer(self.app)
+        self.timer_ocultar_overlay.setSingleShot(True)
+        self.timer_ocultar_overlay.setInterval(15_000)
+        self.timer_ocultar_overlay.timeout.connect(self._ocultar_overlay)
+        self.lista_playlist.itemClicked.connect(
+            lambda _item: self._interacao_playlist()
+        )
 
         self.combo_sessoes = QComboBox()
-        self.combo_sessoes.setFixedHeight(20)
+        self.combo_sessoes.setEditable(True)
+        self.combo_sessoes.lineEdit().setReadOnly(True)
+        self.combo_sessoes.lineEdit().setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.combo_sessoes.setFixedHeight(16)
+        self.combo_sessoes.hide()
         self.combo_sessoes.currentIndexChanged.connect(self._selecionar_sessao)
 
-        linha_musica = QHBoxLayout()
-        linha_musica.setContentsMargins(0, 0, 0, 0)
-        linha_musica.setSpacing(5)
-        self.capa = QLabel("♪")
-        self.capa.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.capa.setFixedSize(42, 42)
-        self.capa.setStyleSheet("background: rgba(255, 255, 255, 35); border-radius: 5px;")
-
-        textos = QVBoxLayout()
-        textos.setContentsMargins(0, 0, 0, 0)
-        textos.setSpacing(1)
         self.titulo = QLabel("Nenhuma mídia encontrada")
-        self.titulo.setWordWrap(True)
-        self.titulo.setMaximumHeight(30)
+        self.titulo.setFixedHeight(18)
+        self.titulo.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.artista = QLabel("")
-        self.artista.setWordWrap(True)
-        self.artista.setMaximumHeight(24)
-        textos.addWidget(self.titulo)
-        textos.addWidget(self.artista)
-        linha_musica.addWidget(self.capa)
-        linha_musica.addLayout(textos, 1)
+        self.artista.setMaximumHeight(14)
+        self.artista.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        controles = QHBoxLayout()
-        controles.setContentsMargins(0, 0, 0, 0)
-        controles.setSpacing(10)
+        controles_principais = QHBoxLayout()
+        controles_principais.setContentsMargins(0, 0, 0, 0)
+        controles_principais.setSpacing(5)
         estilo = QApplication.style()
         self.btn_anterior = self._criar_botao(
             estilo.standardIcon(QStyle.StandardPixmap.SP_MediaSkipBackward),
-            "Música anterior", "anterior"
+            "Música anterior", "anterior", tamanho=28
         )
         self.btn_play_pause = self._criar_botao(
             estilo.standardIcon(QStyle.StandardPixmap.SP_MediaPlay),
-            "Reproduzir ou pausar", "alternar"
+            "Reproduzir ou pausar", "alternar", tamanho=28
         )
         self.btn_proxima = self._criar_botao(
             estilo.standardIcon(QStyle.StandardPixmap.SP_MediaSkipForward),
-            "Próxima música", "proxima"
+            "Próxima música", "proxima", tamanho=28
         )
-        controles.addStretch()
-        controles.addWidget(self.btn_anterior)
-        controles.addWidget(self.btn_play_pause)
-        controles.addWidget(self.btn_proxima)
-        controles.addStretch()
+        controles_principais.addStretch()
+        controles_principais.addWidget(self.btn_anterior)
+        controles_principais.addWidget(self.btn_play_pause)
+        controles_principais.addWidget(self.btn_proxima)
+        controles_principais.addStretch()
 
-        self.status = QLabel("Buscando sessões de mídia...")
-        self.status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        controles_secundarios = QHBoxLayout()
+        controles_secundarios.setContentsMargins(0, 0, 0, 0)
+        controles_secundarios.setSpacing(5)
+        self.btn_voltar_10 = self._criar_botao(
+            None, "Voltar 10 segundos", "voltar_10", "-10", tamanho=28
+        )
+        self.btn_avancar_10 = self._criar_botao(
+            None, "Avançar 10 segundos", "avancar_10", "+10", tamanho=28
+        )
+        self.btn_aleatorio = self._criar_botao(
+            None, "Reprodução aleatória", "aleatorio", "⤨", tamanho=28
+        )
+        self.indicador_aleatorio = QLabel()
+        self.indicador_aleatorio.setFixedSize(4, 4)
+        self.indicador_aleatorio.setStyleSheet(
+            "background: #55d98b; border-radius: 2px;"
+        )
+        self.indicador_aleatorio.hide()
+        grupo_aleatorio = QVBoxLayout()
+        grupo_aleatorio.setContentsMargins(0, 0, 0, 0)
+        grupo_aleatorio.setSpacing(0)
+        grupo_aleatorio.addWidget(self.btn_aleatorio, 0, Qt.AlignmentFlag.AlignCenter)
+        grupo_aleatorio.addWidget(self.indicador_aleatorio, 0, Qt.AlignmentFlag.AlignCenter)
+        self.btn_alternar_overlay = self._criar_botao(
+            estilo.standardIcon(QStyle.StandardPixmap.SP_TitleBarShadeButton),
+            "Mostrar ou ocultar capa e playlist", "alternar_overlay", tamanho=28
+        )
+        self.btn_alternar_overlay.setEnabled(True)
+        controles_secundarios.addStretch()
+        controles_secundarios.addWidget(self.btn_voltar_10)
+        controles_secundarios.addWidget(self.btn_alternar_overlay)
+        controles_secundarios.addWidget(self.btn_avancar_10)
+        controles_secundarios.addStretch()
+
+        controles_mp3 = QVBoxLayout()
+        controles_mp3.setContentsMargins(0, 0, 0, 0)
+        controles_mp3.setSpacing(0)
+        controles_mp3.addLayout(grupo_aleatorio)
+        controles_mp3.addLayout(controles_principais)
+        controles_mp3.addLayout(controles_secundarios)
 
         layout.addWidget(self.combo_sessoes)
-        layout.addLayout(linha_musica, 1)
-        layout.addLayout(controles)
-        layout.addWidget(self.status)
+        layout.addWidget(self.titulo)
+        layout.addWidget(self.artista)
+        layout.addLayout(controles_mp3)
+
+        self._filtro_janela = FiltroJanelaMusica(self)
+        self.app.installEventFilter(self._filtro_janela)
+        self.app.container.installEventFilter(self._filtro_janela)
+        self._filtro_janela.playlist_viewport.installEventFilter(self._filtro_janela)
 
         self.timer_atualizar = QTimer(self.app)
         self.timer_atualizar.setInterval(4000)
         self.timer_atualizar.timeout.connect(self.atualizar_sessoes)
         self.timer_atualizar.start()
+        self.timer_progresso = QTimer(self.app)
+        self.timer_progresso.setInterval(1000)
+        self.timer_progresso.timeout.connect(self._atualizar_progresso)
+        self.timer_progresso.start()
         QTimer.singleShot(0, self.atualizar_sessoes)
 
     def criar_pagina(self):
@@ -231,27 +464,155 @@ class Plugin(PluginBase):
 
     def ao_aplicar_tema(self):
         cor = self.app.cor_texto
-        for label in (self.titulo, self.artista, self.status):
-            label.setStyleSheet(f"color: {cor}; background: transparent;")
+        self.painel_capa.overlay_color = self.app.container.overlay_color
+        self.painel_capa.border_color = self.app.container.border_color
+        self.painel_capa.border_radius = self.app.container.border_radius
+        self.painel_capa.bg_pixmap = self.app.container.bg_pixmap
+        self.painel_capa.update()
+        self.capa.setStyleSheet(
+            aplicar_css_fonte_base("lista")
+            + f"color: {cor}; background: rgba(255, 255, 255, 35); "
+            "border-radius: 4px; font-size: 40px;"
+        )
+        self.artista.setStyleSheet(
+            aplicar_css_fonte_base("data") + f" color: {cor};"
+        )
+        for label in (self.tempo_atual, self.tempo_total):
+            label.setStyleSheet(
+                aplicar_css_fonte_base("cal_meses") + f" color: {cor};"
+            )
+        self.estado_playlist.setStyleSheet(
+            aplicar_css_fonte_base("lista") + f" color: {cor};"
+        )
+        self.lista_playlist.setStyleSheet(
+            "QListWidget { background: transparent; border: none; "
+            f"color: {cor}; {aplicar_css_fonte_base('cal_lista')} }}"
+        )
+        self.titulo.setStyleSheet(
+            aplicar_css_fonte_base("lista") + f"color: {cor};"
+        )
         self.combo_sessoes.setStyleSheet(
-            f"QComboBox {{ color: {cor}; background: rgba(120, 120, 120, 55); "
-            "border: none; border-radius: 4px; padding: 2px; }"
+            "QComboBox { " + aplicar_css_fonte_base("cal_lista")
+            + f" color: {cor}; background: rgba(120, 120, 120, 55); "
+            "border-radius: 4px; padding: 2px; text-align: center; }"
+        )
+        for botao in (self.btn_voltar_10, self.btn_avancar_10, self.btn_aleatorio):
+            botao.setStyleSheet(
+                aplicar_css_fonte_base("cal_lista")
+                + f"color: {cor}; font-size: 9px; font-weight: bold;"
+            )
+        self.progresso.setStyleSheet(
+            "QSlider::groove:horizontal { height: 3px; background: rgba(255,255,255,70); }"
+            "QSlider::sub-page:horizontal { background: #55d98b; }"
+            "QSlider::handle:horizontal { width: 7px; margin: -2px 0; "
+            "border-radius: 3px; background: white; }"
         )
 
     def encerrar(self):
         self._encerrando = True
         self.timer_atualizar.stop()
+        self.timer_progresso.stop()
+        self.timer_playlist.stop()
+        self.timer_ocultar_overlay.stop()
+        self.app.removeEventFilter(self._filtro_janela)
+        self.app.container.removeEventFilter(self._filtro_janela)
+        self.lista_playlist.viewport().removeEventFilter(self._filtro_janela)
+        self._filtro_janela.deleteLater()
+        self.painel_capa.hide()
+        self.painel_capa.deleteLater()
+        self._animacao_capa.stop()
         return not (self._worker is not None and self._worker.isRunning())
 
-    def _criar_botao(self, icone, dica, comando):
+    def _criar_botao(self, icone, dica, comando, texto="", tamanho=24):
         botao = QPushButton()
-        botao.setFixedSize(26, 26)
-        botao.setIcon(icone)
-        botao.setIconSize(QSize(18, 18))
+        botao.setFixedSize(tamanho, tamanho)
+        if icone is not None:
+            botao.setIcon(icone)
+            botao.setIconSize(QSize(tamanho - 10, tamanho - 10))
+        else:
+            botao.setText(texto)
+            botao.setStyleSheet(
+                "QPushButton { font-size: 9px; font-weight: bold; padding: 0; }"
+            )
         botao.setToolTip(dica)
         botao.clicked.connect(lambda: self._enviar_comando(comando))
         botao.setEnabled(False)
+        if comando == "aleatorio":
+            self._opacidade_aleatorio = QGraphicsOpacityEffect(botao)
+            self._opacidade_aleatorio.setOpacity(0.25)
+            botao.setGraphicsEffect(self._opacidade_aleatorio)
         return botao
+
+    def _posicionar_widgets(self):
+        area = self.app.container.geometry()
+        posicao = self.app.mapToGlobal(area.topLeft())
+        self.painel_capa.move(
+            posicao.x(), posicao.y() - self.painel_capa.height() - 5
+        )
+
+    def _mostrar_overlay(self):
+        if self._encerrando:
+            return
+        self._posicionar_widgets()
+        self.pilha_capa.setCurrentWidget(self.pagina_capa)
+        self.painel_capa.show()
+        self.painel_capa.setWindowOpacity(0)
+        self._animacao_capa.stop()
+        self._animacao_capa.setStartValue(0)
+        self._animacao_capa.setEndValue(1)
+        self._retorno_capa_apos_fade = False
+        self._animacao_capa.start()
+        self.timer_ocultar_overlay.start()
+        self.painel_capa.layout().activate()
+        self._atualizar_imagem_capa()
+
+    def _alternar_overlay(self):
+        if not self._overlay_oculto:
+            self._ocultar_overlay()
+            return
+        self._overlay_oculto = False
+        self._mostrar_overlay()
+
+    def _ocultar_overlay(self):
+        if self._overlay_oculto:
+            return
+        self._overlay_oculto = True
+        self.timer_playlist.stop()
+        self.pilha_capa.setCurrentWidget(self.pagina_capa)
+        self._animacao_capa.stop()
+        self._animacao_capa.setStartValue(self.painel_capa.windowOpacity())
+        self._animacao_capa.setEndValue(0)
+        self._retorno_capa_apos_fade = True
+        self._animacao_capa.start()
+
+    def _fim_animacao_capa(self):
+        if self._retorno_capa_apos_fade:
+            self.painel_capa.hide()
+            self._retorno_capa_apos_fade = False
+
+    def _mostrar_playlist(self):
+        if self._encerrando or self._overlay_oculto:
+            return
+        self.lista_playlist.clear()
+        self.estado_playlist.setText(
+            "A fila de reprodução não é fornecida por esta sessão."
+        )
+        self.estado_playlist.show()
+        self.pilha_capa.setCurrentWidget(self.pagina_playlist)
+        self.timer_playlist.start()
+        self.timer_ocultar_overlay.start()
+
+    def _voltar_capa(self):
+        self.pilha_capa.setCurrentWidget(self.pagina_capa)
+
+    def _interacao_playlist(self):
+        if self.pilha_capa.currentWidget() is self.pagina_playlist:
+            self.timer_playlist.start()
+            self.timer_ocultar_overlay.start()
+
+    def _atualizar_imagem_capa(self):
+        if not self._imagem_capa.isNull():
+            self.capa.setPixmap(self._imagem_capa)
 
     def atualizar_sessoes(self):
         if self._encerrando:
@@ -261,8 +622,15 @@ class Plugin(PluginBase):
             return
         self._iniciar_worker()
 
-    def _iniciar_worker(self, comando=None, chave=None):
-        self._worker = WorkerSessoesMedia(comando, chave, self.app)
+    def _iniciar_worker(self, comando=None, chave=None, valor=None):
+        if self._worker is not None and self._worker.isRunning():
+            if comando == "buscar":
+                self._comando_pendente = (comando, chave, valor)
+            return
+        self._comando_em_execucao = comando
+        self._worker = WorkerSessoesMedia(
+            comando, chave, valor=valor, parent=self.app
+        )
         self._worker.sessoes_carregadas.connect(self._mostrar_sessoes)
         self._worker.comando_concluido.connect(self._comando_concluido)
         self._worker.erro.connect(self._mostrar_erro)
@@ -272,6 +640,14 @@ class Plugin(PluginBase):
 
     def _worker_finalizado(self):
         self._worker = None
+        if self._comando_em_execucao == "buscar":
+            self._seek_pendente = False
+        self._comando_em_execucao = None
+        if self._comando_pendente is not None and not self._encerrando:
+            comando, chave, valor = self._comando_pendente
+            self._comando_pendente = None
+            self._iniciar_worker(comando, chave, valor)
+            return
         if self._atualizar_pendente and not self._encerrando:
             self._atualizar_pendente = False
             self.atualizar_sessoes()
@@ -287,6 +663,7 @@ class Plugin(PluginBase):
             fonte = self._nome_fonte(sessao["fonte"])
             nome = f'{fonte} | {sessao["titulo"]}'
             self.combo_sessoes.addItem(nome, sessao["chave"])
+        self.combo_sessoes.setVisible(len(sessoes) > 1)
         indice = self.combo_sessoes.findData(selecao)
         if indice < 0:
             indice = next(
@@ -302,10 +679,19 @@ class Plugin(PluginBase):
         if sessao is None:
             self.titulo.setText("Nenhuma mídia encontrada")
             self.artista.clear()
+            self._imagem_capa = QPixmap()
             self.capa.setPixmap(QPixmap())
             self.capa.setText("♪")
-            self.status.setText("Abra uma música em um app ou navegador compatível.")
-            for botao in (self.btn_anterior, self.btn_play_pause, self.btn_proxima):
+            self.progresso.setRange(0, 0)
+            self.progresso.setEnabled(False)
+            self.tempo_atual.setText("0:00")
+            self.tempo_total.setText("0:00")
+            self.indicador_aleatorio.hide()
+            self._opacidade_aleatorio.setOpacity(0.25)
+            for botao in (
+                self.btn_voltar_10, self.btn_anterior, self.btn_play_pause,
+                self.btn_proxima, self.btn_avancar_10, self.btn_aleatorio
+            ):
                 botao.setEnabled(False)
             return
 
@@ -313,25 +699,84 @@ class Plugin(PluginBase):
         self.artista.setText(sessao["artista"] or self._nome_fonte(sessao["fonte"]))
         pixmap = QPixmap()
         if sessao["imagem"] and pixmap.loadFromData(sessao["imagem"]):
+            self._imagem_capa = pixmap
             self.capa.setText("")
-            self.capa.setPixmap(pixmap.scaled(
-                42, 42, Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation
-            ))
+            self._atualizar_imagem_capa()
         else:
+            self._imagem_capa = QPixmap()
             self.capa.setPixmap(QPixmap())
             self.capa.setText("♪")
+        self._tocando = sessao["tocando"]
+        self.progresso.setRange(0, sessao["duracao"])
+        self.progresso.setEnabled(sessao["pode_buscar"])
+        if not self._arrastando_progresso and not self._seek_pendente:
+            self._posicao_base = sessao["posicao"]
+            self._inicio_relogio = time.monotonic()
+            self.progresso.setValue(sessao["posicao"])
+            self.tempo_atual.setText(self._formatar_tempo(sessao["posicao"]))
+        self.tempo_total.setText(self._formatar_tempo(sessao["duracao"]))
         self.btn_anterior.setEnabled(sessao["pode_anterior"])
         self.btn_proxima.setEnabled(sessao["pode_proxima"])
+        self.btn_voltar_10.setEnabled(sessao["pode_buscar"])
+        self.btn_avancar_10.setEnabled(sessao["pode_buscar"])
         self.btn_play_pause.setEnabled(sessao["pode_alternar"])
+        self.btn_aleatorio.setEnabled(sessao["pode_aleatorio"])
+        self._opacidade_aleatorio.setOpacity(1.0 if sessao["pode_aleatorio"] else 0.25)
+        self.indicador_aleatorio.setVisible(
+            sessao["pode_aleatorio"] and sessao["aleatorio"]
+        )
         icone = QStyle.StandardPixmap.SP_MediaPause if sessao["tocando"] else QStyle.StandardPixmap.SP_MediaPlay
         self.btn_play_pause.setIcon(QApplication.style().standardIcon(icone))
-        self.status.setText("Reproduzindo" if sessao["tocando"] else "Pausado")
 
-    def _enviar_comando(self, comando):
+    def _enviar_comando(self, comando, valor=None):
+        if comando == "alternar_overlay":
+            self._alternar_overlay()
+            return
         chave = self.combo_sessoes.currentData()
-        if chave is not None and (self._worker is None or not self._worker.isRunning()):
-            self._iniciar_worker(comando, chave)
+        if chave is None:
+            return
+        if comando == "voltar_10":
+            comando = "buscar"
+            valor = max(0, self._posicao_atual() - 10)
+        elif comando == "avancar_10":
+            sessao = next((item for item in self._sessoes if item["chave"] == chave), None)
+            comando = "buscar"
+            valor = min(
+                sessao["duracao"], self._posicao_atual() + 10
+            ) if sessao else self._posicao_atual() + 10
+        elif comando == "aleatorio":
+            sessao = next((item for item in self._sessoes if item["chave"] == chave), None)
+            valor = not sessao["aleatorio"] if sessao else False
+        elif comando == "buscar":
+            self._seek_pendente = True
+            valor = self.progresso.value() if valor is None else valor
+            self.tempo_atual.setText(self._formatar_tempo(valor))
+        self._iniciar_worker(comando, chave, valor)
+
+    def _iniciar_arrasto(self):
+        self._arrastando_progresso = True
+
+    def _confirmar_busca(self):
+        self._arrastando_progresso = False
+        self._enviar_comando("buscar", self.progresso.value())
+
+    def _atualizar_progresso(self):
+        if self._arrastando_progresso or self._seek_pendente:
+            return
+        posicao = self._posicao_atual()
+        self.tempo_atual.setText(self._formatar_tempo(posicao))
+        if self.progresso.maximum() > 0:
+            self.progresso.setValue(posicao)
+
+    def _posicao_atual(self):
+        decorrido = int(time.monotonic() - self._inicio_relogio) if self._tocando else 0
+        return min(self.progresso.maximum(), self._posicao_base + decorrido)
+
+    @staticmethod
+    def _formatar_tempo(segundos):
+        minutos, segundos = divmod(max(0, int(segundos)), 60)
+        horas, minutos = divmod(minutos, 60)
+        return f"{horas}:{minutos:02d}:{segundos:02d}" if horas else f"{minutos}:{segundos:02d}"
 
     def _comando_concluido(self, sucesso):
         if not self._encerrando:
@@ -339,8 +784,8 @@ class Plugin(PluginBase):
 
     def _mostrar_erro(self, mensagem):
         if not self._encerrando:
-            self.status.setText("Controle de mídia indisponível")
-            self.status.setToolTip(mensagem)
+            self.titulo.setText("Controle de mídia indisponível")
+            self.titulo.setToolTip(mensagem)
 
     @staticmethod
     def _nome_fonte(fonte):
