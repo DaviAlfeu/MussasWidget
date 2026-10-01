@@ -29,7 +29,10 @@ from config import (
     MARGEM_AREA_ICONES
 )
 from utils import (
-    raio_desfoque, alpha_desfoque, get_app_dir, resource_path, external_resource_path, carregar_fontes, versao_tuple, caminho_executavel_atual, executar_atualizacao_bat, normalizar_cor_hex, aplicar_css_fonte_base
+    raio_desfoque, alpha_desfoque, get_app_dir, resource_path, external_resource_path,
+    carregar_fontes, versao_tuple, caminho_executavel_atual,
+    executar_atualizacao_bat, pasta_temporaria_widget,
+    normalizar_cor_hex, aplicar_css_fonte_base
 )
 from workers import WorkerMonitorProcessos
 from ui_components import OutlineLabel, BlurredBackgroundFrame, ClickableLabel
@@ -736,7 +739,7 @@ class WidgetFrutigerAero(QWidget):
             if resposta_msg != QMessageBox.StandardButton.Yes: return
                 
             QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-            temp_dir = tempfile.gettempdir()
+            temp_dir = pasta_temporaria_widget()
             novo_exe = os.path.join(temp_dir, f"MussasWidget_new_{os.getpid()}.exe")
             req_download = urllib.request.Request(url_download, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
             

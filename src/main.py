@@ -10,13 +10,14 @@ if __name__ == '__main__':
     app = QApplication(sys.argv)
     
     from PyQt6.QtGui import QIcon
-    from utils import external_resource_path
+    from utils import external_resource_path, limpar_versoes_antigas
     app.setWindowIcon(QIcon(external_resource_path("assets/icone.ico")))
     
     shared_memory = QSharedMemory("MussasWidget_SingleInstance")
     if shared_memory.attach():
         sys.exit(0)
     shared_memory.create(1)
+    limpar_versoes_antigas()
     
     QApplication.setQuitOnLastWindowClosed(False) 
     

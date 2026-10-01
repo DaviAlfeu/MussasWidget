@@ -2,6 +2,7 @@ import os
 import sys
 import tempfile
 import subprocess
+import time
 from datetime import datetime
 from PyQt6.QtGui import QFontDatabase
 from config import CONFIG_FONTES
@@ -75,26 +76,96 @@ def caminho_executavel_atual():
         return os.path.abspath(sys.executable)
     return os.path.abspath(sys.argv[0])
 
+
+def pasta_temporaria_widget():
+    caminho = os.path.join(tempfile.gettempdir(), "MussasWidget")
+    os.makedirs(caminho, exist_ok=True)
+    return caminho
+
+
+def limpar_versoes_antigas():
+    pasta = os.path.join(tempfile.gettempdir(), "MussasWidget")
+    if not os.path.isdir(pasta):
+        return 0
+
+    removidos = 0
+    for entrada in os.scandir(pasta):
+        if not entrada.is_file(follow_symlinks=False) or not entrada.name.lower().endswith(".old"):
+            continue
+        try:
+            os.remove(entrada.path)
+            removidos += 1
+        except OSError:
+            pass
+    return removidos
+
+
 def executar_atualizacao_bat(novo_exe):
+    if not getattr(sys, "frozen", False):
+        raise RuntimeError("A instalação automática exige o aplicativo compilado.")
+
     exe_atual = caminho_executavel_atual()
-    caminho_old = exe_atual + ".old"
-    bat_path = os.path.join(tempfile.gettempdir(), f"mussas_update_{os.getpid()}.bat")
-    conteudo = f"""@echo off
-ping 127.0.0.1 -n 4 > NUL
-taskkill /F /PID {os.getpid()} > NUL 2>&1
-ping 127.0.0.1 -n 8 > NUL
-del /q "{caminho_old}" > NUL 2>&1
-move /Y "{exe_atual}" "{caminho_old}" > NUL 2>&1
-move /Y "{novo_exe}" "{exe_atual}" > NUL 2>&1
-powershell -windowstyle hidden -Command "Unblock-File -LiteralPath '{exe_atual}'" > NUL 2>&1
-ping 127.0.0.1 -n 4 > NUL
-start "" "{exe_atual}"
-del "%~f0" > NUL 2>&1
+    novo_exe = os.path.abspath(novo_exe)
+    if not os.path.isfile(novo_exe):
+        raise FileNotFoundError(novo_exe)
+
+    pasta_temporaria = pasta_temporaria_widget()
+    caminho_old = os.path.join(
+        pasta_temporaria,
+        f"{os.path.basename(exe_atual)}.{os.getpid()}.old"
+    )
+    script_path = os.path.join(
+        pasta_temporaria, f"mussas_update_{os.getpid()}_{time.time_ns()}.ps1"
+    )
+    escapar_powershell = lambda valor: "'" + valor.replace("'", "''") + "'"
+    conteudo = f"""$ErrorActionPreference = 'Stop'
+$currentPath = {escapar_powershell(exe_atual)}
+$stagedPath = {escapar_powershell(novo_exe)}
+$backupPath = {escapar_powershell(caminho_old)}
+$targetPid = {os.getpid()}
+
+while (Get-Process -Id $targetPid -ErrorAction SilentlyContinue) {{
+    Start-Sleep -Milliseconds 200
+}}
+
+try {{
+    if (Test-Path -LiteralPath $backupPath) {{
+        Remove-Item -LiteralPath $backupPath -Force
+    }}
+    Move-Item -LiteralPath $currentPath -Destination $backupPath -Force
+    try {{
+        Move-Item -LiteralPath $stagedPath -Destination $currentPath -Force
+    }} catch {{
+        if (Test-Path -LiteralPath $backupPath) {{
+            Move-Item -LiteralPath $backupPath -Destination $currentPath -Force
+        }}
+        throw
+    }}
+    Unblock-File -LiteralPath $currentPath -ErrorAction SilentlyContinue
+    Start-Process -FilePath $currentPath
+}} catch {{
+    if (-not (Test-Path -LiteralPath $currentPath) -and (Test-Path -LiteralPath $backupPath)) {{
+        Move-Item -LiteralPath $backupPath -Destination $currentPath -Force
+    }}
+}} finally {{
+    Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
+}}
 """
-    with open(bat_path, "w", encoding="utf-8", newline="\r\n") as f:
-        f.write(conteudo)
+    with open(script_path, "w", encoding="utf-8-sig", newline="\r\n") as arquivo:
+        arquivo.write(conteudo)
+
     CREATE_NO_WINDOW = 0x08000000
-    subprocess.Popen([bat_path], creationflags=CREATE_NO_WINDOW)
+    try:
+        subprocess.Popen(
+            ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script_path],
+            creationflags=CREATE_NO_WINDOW
+        )
+    except Exception:
+        try:
+            os.remove(script_path)
+        except OSError:
+            pass
+        raise
 
 def normalizar_cor_hex(valor):
     valor = (valor or "").strip().replace(" ", "")

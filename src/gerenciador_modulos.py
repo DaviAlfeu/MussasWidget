@@ -1,4 +1,5 @@
 import os
+import ast
 import importlib.util
 import json
 import tempfile
@@ -12,6 +13,28 @@ os.makedirs(PASTA_MODULOS, exist_ok=True)
 
 URL_MODULOS_GITHUB = "https://api.github.com/repos/DaviAlfeu/MussasWidget/contents/Modulos"
 URL_DOWNLOAD_MODULOS_GITHUB = "https://raw.githubusercontent.com/DaviAlfeu/MussasWidget/"
+
+
+def _extrair_versao_modulo(conteudo):
+    try:
+        arvore = ast.parse(conteudo.decode("utf-8-sig"))
+    except (UnicodeDecodeError, SyntaxError):
+        return None
+
+    for classe in arvore.body:
+        if not isinstance(classe, ast.ClassDef) or classe.name != "Plugin":
+            continue
+        for instrucao in classe.body:
+            if isinstance(instrucao, ast.Assign):
+                alvos = instrucao.targets
+            elif isinstance(instrucao, ast.AnnAssign):
+                alvos = [instrucao.target]
+            else:
+                continue
+            if any(isinstance(alvo, ast.Name) and alvo.id == "versao" for alvo in alvos):
+                if isinstance(instrucao.value, ast.Constant) and isinstance(instrucao.value.value, str):
+                    return instrucao.value.value
+    return None
 
 
 def listar_modulos_github():
@@ -32,7 +55,16 @@ def listar_modulos_github():
         if (entrada.get("type") == "file" and isinstance(nome, str)
                 and nome.endswith(".py") and os.path.basename(nome) == nome
                 and isinstance(url, str) and url.startswith(URL_DOWNLOAD_MODULOS_GITHUB)):
-            modulos.append({"nome": nome, "url": url})
+            versao = None
+            try:
+                req_modulo = urllib.request.Request(
+                    url, headers={"User-Agent": "MussasWidget"}
+                )
+                with urllib.request.urlopen(req_modulo, timeout=10) as resposta_modulo:
+                    versao = _extrair_versao_modulo(resposta_modulo.read())
+            except Exception:
+                pass
+            modulos.append({"nome": nome, "url": url, "versao": versao})
     return sorted(modulos, key=lambda modulo: modulo["nome"].lower())
 
 
@@ -189,6 +221,10 @@ class GerenciadorModulos:
             self.main_app._aplicar_area_segura_paginas()
             self.main_app._criar_dots_pagina()
             self.main_app.posicionar_elementos()
+            try:
+                plugin.ao_aplicar_tema()
+            except Exception as erro:
+                print(f"[Módulo] Erro ao aplicar tema em '{plugin.nome}': {erro}")
             print(f"[Módulo] '{plugin.nome}' v{plugin.versao} carregado.")
             return True
         except Exception as erro:

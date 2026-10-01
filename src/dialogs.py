@@ -14,7 +14,8 @@ from config import (
     MARGEM_SEGURANCA_BOLINHAS
 )
 from utils import (
-    raio_desfoque, normalizar_cor_hex, aplicar_css_fonte_base, alpha_desfoque
+    raio_desfoque, normalizar_cor_hex, aplicar_css_fonte_base, alpha_desfoque,
+    versao_tuple
 )
 from ui_components import BlurredBackgroundFrame, OutlineLabel, ClickableMes, ClickableLabel
 from gerenciador_modulos import PASTA_MODULOS, estado_modulo
@@ -328,7 +329,11 @@ class JanelaConfiguracoes(QDialog):
             layout_linha = QHBoxLayout(linha)
             layout_linha.setContentsMargins(0, 4, 0, 4)
             nome = modulo["nome"]
-            rotulo = QLabel(os.path.splitext(nome)[0])
+            nome_exibicao = os.path.splitext(nome)[0]
+            versao = modulo.get("versao")
+            if versao and versao_tuple(versao) < (1, 0, 0):
+                nome_exibicao += "-BETA"
+            rotulo = QLabel(nome_exibicao)
             layout_linha.addWidget(rotulo, 1)
             estado = estado_modulo(nome)
             acoes = []
