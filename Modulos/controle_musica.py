@@ -874,7 +874,7 @@ class Plugin(PluginBase):
         self._enviar_comando("buscar", self.progresso.value())
 
     def _atualizar_progresso(self):
-        if self._arrastando_progresso or self._seek_pendente:
+        if self._arrastando_progresso:
             return
         posicao = self._posicao_atual()
         self.tempo_atual.setText(self._formatar_tempo(posicao))
