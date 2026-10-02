@@ -17,10 +17,14 @@ from gerenciador_modulos import PluginBase
 from ui_components import BlurredBackgroundFrame, ClickableLabel
 
 try:
-    from winrt.windows.media.control import GlobalSystemMediaTransportControlsSessionManager
+    from winrt.windows.media.control import (
+        GlobalSystemMediaTransportControlsSessionManager,
+        GlobalSystemMediaTransportControlsSessionPlaybackStatus,
+    )
     from winrt.windows.storage.streams import DataReader
 except ImportError as erro:
     GlobalSystemMediaTransportControlsSessionManager = None
+    GlobalSystemMediaTransportControlsSessionPlaybackStatus = None
     DataReader = None
     ERRO_WINRT = str(erro)
 else:
@@ -116,8 +120,8 @@ class WorkerSessoesMedia(QThread):
                 ocorrencia = ocorrencias.get(base, 0)
                 ocorrencias[base] = ocorrencia + 1
                 chave = base + (ocorrencia,)
-                controles = sessao.get_playback_info().controls
                 info_reproducao = sessao.get_playback_info()
+                controles = info_reproducao.controls
                 try:
                     linha_tempo = sessao.get_timeline_properties()
                     inicio = self._segundos(linha_tempo.start_time)
@@ -148,7 +152,10 @@ class WorkerSessoesMedia(QThread):
                     "titulo": titulo,
                     "artista": artista,
                     "imagem": imagem,
-                    "tocando": controles.is_pause_enabled,
+                    "tocando": (
+                        info_reproducao.playback_status
+                        == GlobalSystemMediaTransportControlsSessionPlaybackStatus.PLAYING
+                    ),
                     "pode_alternar": controles.is_play_pause_toggle_enabled,
                     "pode_anterior": controles.is_previous_enabled,
                     "pode_proxima": controles.is_next_enabled,
