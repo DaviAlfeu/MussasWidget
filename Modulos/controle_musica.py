@@ -100,6 +100,7 @@ class WorkerSessoesMedia(QThread):
                 "tocando": tocando,
                 "posicao": self._posicao_linha_tempo(linha_tempo, tocando),
                 "capturado_em": time.monotonic(),
+                "atualizado_em": linha_tempo.last_updated_time,
             }
         if self.comando is not None:
             sessao_alvo = await self._localizar_sessao(sessoes)
@@ -152,6 +153,7 @@ class WorkerSessoesMedia(QThread):
                     )
                     duracao = max(0, fim - inicio)
                     capturado_em = time.monotonic()
+                    atualizado_em = linha_tempo.last_updated_time
                     pode_buscar = fim > inicio and (
                         self._segundos(linha_tempo.max_seek_time)
                         > self._segundos(linha_tempo.min_seek_time)
@@ -161,6 +163,7 @@ class WorkerSessoesMedia(QThread):
                     posicao = 0
                     duracao = 0
                     capturado_em = time.monotonic()
+                    atualizado_em = None
                     pode_buscar = False
                 identificador = fonte.lower()
                 fonte_musical = any(
@@ -188,6 +191,7 @@ class WorkerSessoesMedia(QThread):
                     "duracao": duracao,
                     "inicio": inicio,
                     "capturado_em": capturado_em,
+                    "atualizado_em": atualizado_em,
                     "pode_buscar": pode_buscar,
                     "pode_aleatorio": (
                         fonte_musical and controles.is_shuffle_enabled
@@ -307,6 +311,8 @@ class Plugin(PluginBase):
         self._inicio_relogio = time.monotonic()
         self._ultima_atualizacao_estado = 0.0
         self._tocando = False
+        self._busca_em_confirmacao = False
+        self._busca_solicitada_em = None
         self._imagem_capa = QPixmap()
         self._overlay_oculto = True
         self._retorno_capa_apos_fade = False
@@ -690,6 +696,8 @@ class Plugin(PluginBase):
             if comando == "buscar":
                 self._comando_pendente = (comando, chave, valor)
             return
+        if comando == "buscar":
+            self._busca_solicitada_em = datetime.now(timezone.utc)
         self._comando_em_execucao = comando
         self._worker = WorkerSessoesMedia(
             comando, chave, valor=valor, parent=self.app
@@ -777,8 +785,9 @@ class Plugin(PluginBase):
         self.progresso.setRange(0, sessao["duracao"])
         self.progresso.setEnabled(sessao["pode_buscar"])
         if not self._arrastando_progresso and not self._seek_pendente:
-            self._posicao_base = sessao["posicao"]
-            self._inicio_relogio = sessao["capturado_em"]
+            if self._pode_sincronizar_posicao(sessao["atualizado_em"]):
+                self._posicao_base = sessao["posicao"]
+                self._inicio_relogio = sessao["capturado_em"]
             posicao = self._posicao_atual()
             self.progresso.setValue(posicao)
             self.tempo_atual.setText(self._formatar_tempo(posicao))
@@ -795,6 +804,19 @@ class Plugin(PluginBase):
         )
         icone = QStyle.StandardPixmap.SP_MediaPause if sessao["tocando"] else QStyle.StandardPixmap.SP_MediaPlay
         self.btn_play_pause.setIcon(QApplication.style().standardIcon(icone))
+
+    def _pode_sincronizar_posicao(self, atualizado_em):
+        if not self._busca_em_confirmacao:
+            return True
+        if (
+            atualizado_em is not None
+            and self._busca_solicitada_em is not None
+            and atualizado_em >= self._busca_solicitada_em
+        ):
+            self._busca_em_confirmacao = False
+            self._busca_solicitada_em = None
+            return True
+        return False
 
     def _enviar_comando(self, comando, valor=None):
         if comando == "alternar_overlay":
@@ -818,7 +840,11 @@ class Plugin(PluginBase):
         elif comando == "buscar":
             self._seek_pendente = True
             valor = self.progresso.value() if valor is None else valor
+            self._posicao_base = max(0, min(self.progresso.maximum(), int(valor)))
+            self._inicio_relogio = time.monotonic()
+            self._busca_em_confirmacao = True
             self.tempo_atual.setText(self._formatar_tempo(valor))
+            self.progresso.setValue(valor)
         self._iniciar_worker(comando, chave, valor)
 
     def _iniciar_arrasto(self):
@@ -864,12 +890,20 @@ class Plugin(PluginBase):
         )
         if sessao is None:
             return
+        posicao_local = self._posicao_atual()
         sessao["tocando"] = estado["tocando"]
-        sessao["posicao"] = estado["posicao"]
         self._ultima_atualizacao_estado = estado["capturado_em"]
         self._tocando = estado["tocando"]
-        self._posicao_base = estado["posicao"]
-        self._inicio_relogio = estado["capturado_em"]
+        if (
+            not self._seek_pendente
+            and self._pode_sincronizar_posicao(estado["atualizado_em"])
+        ):
+            sessao["posicao"] = estado["posicao"]
+            self._posicao_base = estado["posicao"]
+            self._inicio_relogio = estado["capturado_em"]
+        else:
+            self._posicao_base = posicao_local
+            self._inicio_relogio = estado["capturado_em"]
         if not self._arrastando_progresso and not self._seek_pendente:
             posicao = self._posicao_atual()
             self.tempo_atual.setText(self._formatar_tempo(posicao))
