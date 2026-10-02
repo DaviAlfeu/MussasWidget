@@ -1,5 +1,6 @@
 import os
 import sys
+from collections.abc import Callable
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QCheckBox, QLabel, QSlider, QHBoxLayout, 
     QPushButton, QComboBox, QWidget, QStackedWidget, QGridLayout, QScrollArea,
@@ -459,9 +460,9 @@ class JanelaConfiguracoes(QDialog):
 
 
 class JanelaCalendario(QWidget):
-    def __init__(self, main_app):
+    def __init__(self, reiniciar_timer: Callable[[], None]):
         super().__init__()
-        self.main_app = main_app
+        self._reiniciar_timer = reiniciar_timer
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setFixedWidth(150)
@@ -557,11 +558,11 @@ class JanelaCalendario(QWidget):
                 lbl.installEventFilter(self)
                 
         self.stacked.setCurrentIndex(1)
-        self.main_app.reiniciar_timer_calendario()
+        self._reiniciar_timer()
 
     def eventFilter(self, obj, event):
         if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
-            self.main_app.reiniciar_timer_calendario()
+            self._reiniciar_timer()
             if self.stacked.currentIndex() == 1:
                 self.stacked.setCurrentIndex(0)
                 return True
@@ -590,4 +591,3 @@ class JanelaCalendario(QWidget):
             else:
                 lbl.setCursor(Qt.CursorShape.PointingHandCursor)
             lbl.setStyleSheet(lbl.styleSheet() + bg_css)
-
