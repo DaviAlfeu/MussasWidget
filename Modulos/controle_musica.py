@@ -91,14 +91,14 @@ class WorkerSessoesMedia(QThread):
             if sessao is None:
                 return None
             info_reproducao = sessao.get_playback_info()
-            tocando = (
-                info_reproducao.playback_status
-                == GlobalSystemMediaTransportControlsSessionPlaybackStatus.PLAYING
-            )
+            tocando = self._estado_tocando(info_reproducao.playback_status)
             linha_tempo = sessao.get_timeline_properties()
             return {
                 "tocando": tocando,
-                "posicao": self._posicao_linha_tempo(linha_tempo, tocando),
+                "status_mudando": tocando is None,
+                "posicao": self._posicao_linha_tempo(
+                    linha_tempo, tocando is True
+                ),
                 "capturado_em": time.monotonic(),
                 "atualizado_em": linha_tempo.last_updated_time,
             }
@@ -148,8 +148,9 @@ class WorkerSessoesMedia(QThread):
                     fim = self._segundos(linha_tempo.end_time)
                     posicao = self._posicao_linha_tempo(
                         linha_tempo,
-                        info_reproducao.playback_status
-                        == GlobalSystemMediaTransportControlsSessionPlaybackStatus.PLAYING,
+                        self._estado_tocando(
+                            info_reproducao.playback_status
+                        ) is True,
                     )
                     duracao = max(0, fim - inicio)
                     capturado_em = time.monotonic()
@@ -180,9 +181,12 @@ class WorkerSessoesMedia(QThread):
                     "titulo": titulo,
                     "artista": artista,
                     "imagem": imagem,
-                    "tocando": (
+                    "tocando": self._estado_tocando(
                         info_reproducao.playback_status
-                        == GlobalSystemMediaTransportControlsSessionPlaybackStatus.PLAYING
+                    ),
+                    "status_mudando": (
+                        info_reproducao.playback_status
+                        == GlobalSystemMediaTransportControlsSessionPlaybackStatus.CHANGING
                     ),
                     "pode_alternar": controles.is_play_pause_toggle_enabled,
                     "pode_anterior": controles.is_previous_enabled,
@@ -226,6 +230,12 @@ class WorkerSessoesMedia(QThread):
         if hasattr(valor, "total_seconds"):
             return int(valor.total_seconds())
         return int(valor / 10_000_000)
+
+    @staticmethod
+    def _estado_tocando(status):
+        if status == GlobalSystemMediaTransportControlsSessionPlaybackStatus.CHANGING:
+            return None
+        return status == GlobalSystemMediaTransportControlsSessionPlaybackStatus.PLAYING
 
     @classmethod
     def _posicao_linha_tempo(cls, linha_tempo, tocando):
@@ -728,6 +738,12 @@ class Plugin(PluginBase):
         if self._encerrando:
             return
         selecao = self.combo_sessoes.currentData()
+        estados_anteriores = {
+            sessao["chave"]: sessao["tocando"] for sessao in self._sessoes
+        }
+        for sessao in sessoes:
+            if sessao["tocando"] is None:
+                sessao["tocando"] = estados_anteriores.get(sessao["chave"], False)
         self._sessoes = sessoes
         self.combo_sessoes.blockSignals(True)
         self.combo_sessoes.clear()
@@ -785,7 +801,10 @@ class Plugin(PluginBase):
         self.progresso.setRange(0, sessao["duracao"])
         self.progresso.setEnabled(sessao["pode_buscar"])
         if not self._arrastando_progresso and not self._seek_pendente:
-            if self._pode_sincronizar_posicao(sessao["atualizado_em"]):
+            if (
+                not sessao["status_mudando"]
+                and self._pode_sincronizar_posicao(sessao["atualizado_em"])
+            ):
                 self._posicao_base = sessao["posicao"]
                 self._inicio_relogio = sessao["capturado_em"]
             posicao = self._posicao_atual()
@@ -891,11 +910,14 @@ class Plugin(PluginBase):
         if sessao is None:
             return
         posicao_local = self._posicao_atual()
-        sessao["tocando"] = estado["tocando"]
+        if estado["tocando"] is not None:
+            sessao["tocando"] = estado["tocando"]
         self._ultima_atualizacao_estado = estado["capturado_em"]
-        self._tocando = estado["tocando"]
+        if estado["tocando"] is not None:
+            self._tocando = estado["tocando"]
         if (
             not self._seek_pendente
+            and not estado["status_mudando"]
             and self._pode_sincronizar_posicao(estado["atualizado_em"])
         ):
             sessao["posicao"] = estado["posicao"]
