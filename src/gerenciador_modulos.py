@@ -196,6 +196,10 @@ class PluginBase:
         """Retorna lista de dicts: [{nome_png, texto_fallback, callback}, ...] ou []."""
         return []
 
+    def abrir_configuracoes(self, parent=None):
+        """Abre as configurações próprias do módulo, se houver."""
+        return False
+
     def ao_aplicar_tema(self):
         """Chamado quando o tema muda. Override para atualizar estilos."""
         pass
@@ -226,6 +230,37 @@ class GerenciadorModulos:
             if not arquivo.endswith('.py'):
                 continue
             self.ativar_modulo(arquivo)
+
+    @staticmethod
+    def modulo_tem_configuracoes(arquivo):
+        _validar_nome_modulo(arquivo)
+        caminho = os.path.join(PASTA_MODULOS, arquivo)
+        try:
+            with open(caminho, "r", encoding="utf-8-sig") as fonte:
+                arvore = ast.parse(fonte.read())
+        except (OSError, SyntaxError, UnicodeDecodeError):
+            return False
+
+        return any(
+            isinstance(no, ast.ClassDef)
+            and no.name == "Plugin"
+            and any(
+                isinstance(metodo, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and metodo.name == "abrir_configuracoes"
+                for metodo in no.body
+            )
+            for no in arvore.body
+        )
+
+    def abrir_configuracoes_modulo(self, arquivo, parent=None):
+        registro = self._registros_modulos.get(arquivo)
+        if registro is None:
+            return False
+        plugin = registro["plugin"]
+        metodo = getattr(type(plugin), "abrir_configuracoes", None)
+        if metodo is None or metodo is PluginBase.abrir_configuracoes:
+            return False
+        return plugin.abrir_configuracoes(parent)
 
     def ativar_modulo(self, arquivo):
         self.ultimo_erro_ativacao = None

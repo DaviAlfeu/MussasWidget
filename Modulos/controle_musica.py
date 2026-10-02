@@ -1,6 +1,10 @@
 import asyncio
+import json
+import secrets
 import time
+import threading
 from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from PyQt6.QtCore import (
     QEvent, QObject, QPoint, QPropertyAnimation, QRectF, QThread, QTimer, Qt, QSize,
@@ -8,11 +12,13 @@ from PyQt6.QtCore import (
 )
 from PyQt6.QtGui import QPainter, QPainterPath, QPixmap
 from PyQt6.QtWidgets import (
-    QApplication, QComboBox, QGraphicsOpacityEffect, QHBoxLayout,
+    QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
+    QGraphicsOpacityEffect, QHBoxLayout,
     QLabel, QListWidget, QPushButton, QSlider, QStackedWidget, QStyle,
     QVBoxLayout, QWidget
 )
 
+from config import config_app
 from utils import aplicar_css_fonte_base
 from gerenciador_modulos import PluginBase
 from ui_components import BlurredBackgroundFrame, ClickableLabel
@@ -119,13 +125,18 @@ class WorkerSessoesMedia(QThread):
                     posicao * 10_000_000
                 )
                 if sucesso and self.retomar:
-                    info_reproducao = sessao_alvo.get_playback_info()
-                    if (
-                        info_reproducao.playback_status
-                        != GlobalSystemMediaTransportControlsSessionPlaybackStatus.PLAYING
-                        and info_reproducao.controls.is_play_enabled
-                    ):
-                        await sessao_alvo.try_play_async()
+                    controles = sessao_alvo.get_playback_info().controls
+                    if not controles.is_play_enabled:
+                        raise RuntimeError(
+                            "O player aceitou a busca, mas não permite retomar "
+                            "a reprodução por controle de mídia do Windows."
+                        )
+                    retomada = await sessao_alvo.try_play_async()
+                    if not retomada:
+                        raise RuntimeError(
+                            "O player aceitou a busca, mas recusou retomar "
+                            "a reprodução."
+                        )
                 return sucesso
             acoes = {
                 "alternar": sessao_alvo.try_toggle_play_pause_async,
@@ -293,6 +304,142 @@ class WorkerSessoesMedia(QThread):
             return b""
 
 
+class PontePlaylistLocal:
+    PORTA = 47832
+    MAX_BYTES = 256 * 1024
+    PROVEDORES = {"spotify", "youtube", "youtube_music", "soundcloud"}
+
+    def __init__(self, porta=None):
+        self._token = secrets.token_urlsafe(32)
+        self._lock = threading.Lock()
+        self._snapshot = None
+        ponte = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def _responder(self, status, corpo=b"", tipo="application/json"):
+                origem = self.headers.get("Origin", "")
+                cabecalhos = {}
+                if origem.startswith("chrome-extension://"):
+                    cabecalhos = {
+                        "Access-Control-Allow-Origin": origem,
+                        "Access-Control-Allow-Headers": "Authorization, Content-Type",
+                        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+                        "Vary": "Origin",
+                    }
+                self.send_response(status)
+                self.send_header("Content-Type", tipo)
+                self.send_header("Cache-Control", "no-store")
+                for nome, valor in cabecalhos.items():
+                    self.send_header(nome, valor)
+                self.end_headers()
+                if corpo:
+                    self.wfile.write(corpo)
+
+            def do_OPTIONS(self):
+                origem = self.headers.get("Origin", "")
+                if not origem.startswith("chrome-extension://"):
+                    self._responder(403)
+                    return
+                self._responder(204)
+
+            def do_GET(self):
+                if self.path != "/config":
+                    self._responder(404)
+                    return
+                origem = self.headers.get("Origin", "")
+                if not origem.startswith("chrome-extension://"):
+                    self._responder(403)
+                    return
+                corpo = json.dumps({
+                    "token": ponte._token,
+                    "port": ponte.porta,
+                }).encode("utf-8")
+                self._responder(200, corpo)
+
+            def do_POST(self):
+                if self.path != "/playlist":
+                    self._responder(404)
+                    return
+                autorizacao = self.headers.get("Authorization", "")
+                token = autorizacao.removeprefix("Bearer ").strip()
+                if not secrets.compare_digest(token, ponte._token):
+                    self._responder(401)
+                    return
+                try:
+                    tamanho = int(self.headers.get("Content-Length", "0"))
+                except ValueError:
+                    self._responder(400)
+                    return
+                if not 0 < tamanho <= ponte.MAX_BYTES:
+                    self._responder(413)
+                    return
+                try:
+                    dados = json.loads(self.rfile.read(tamanho))
+                    snapshot = ponte._validar_snapshot(dados)
+                except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+                    self._responder(400)
+                    return
+                with ponte._lock:
+                    ponte._snapshot = snapshot
+                self._responder(204)
+
+            def log_message(self, _formato, *_args):
+                return
+
+        self._servidor = ThreadingHTTPServer(
+            ("127.0.0.1", self.PORTA if porta is None else porta), Handler
+        )
+        self.porta = self._servidor.server_address[1]
+        self._servidor.daemon_threads = True
+        self._thread = threading.Thread(
+            target=self._servidor.serve_forever,
+            name="ponte-playlist-local",
+            daemon=True,
+        )
+        self._thread.start()
+
+    @classmethod
+    def _validar_snapshot(cls, dados):
+        if not isinstance(dados, dict):
+            raise ValueError("O snapshot da extensão deve ser um objeto.")
+        provedor = dados.get("provider")
+        faixas = dados.get("tracks")
+        if provedor not in cls.PROVEDORES or not isinstance(faixas, list):
+            raise ValueError("Provedor ou lista de faixas inválidos.")
+        resultado = []
+        for faixa in faixas[:100]:
+            if not isinstance(faixa, dict):
+                continue
+            titulo = faixa.get("title")
+            artista = faixa.get("artist", "")
+            if not isinstance(titulo, str) or not titulo.strip():
+                continue
+            if not isinstance(artista, str):
+                artista = ""
+            resultado.append({
+                "title": titulo.strip()[:200],
+                "artist": artista.strip()[:200],
+            })
+        titulo_lista = dados.get("listTitle", "")
+        if not isinstance(titulo_lista, str):
+            titulo_lista = ""
+        return {
+            "provider": provedor,
+            "list_title": titulo_lista.strip()[:200],
+            "tracks": resultado,
+            "received_at": time.monotonic(),
+        }
+
+    def snapshot(self):
+        with self._lock:
+            return self._snapshot.copy() if self._snapshot is not None else None
+
+    def close(self):
+        self._servidor.shutdown()
+        self._servidor.server_close()
+        self._thread.join(timeout=1)
+
+
 class FiltroJanelaMusica(QObject):
     def __init__(self, plugin):
         super().__init__(plugin.app)
@@ -324,7 +471,7 @@ class FiltroJanelaMusica(QObject):
 
 class Plugin(PluginBase):
     nome = "Música"
-    versao = "0.1.0"
+    versao = "0.1.1"
 
     def __init__(self, app):
         super().__init__(app)
@@ -349,6 +496,12 @@ class Plugin(PluginBase):
         self._seek_pendente = False
         self._comando_pendente = None
         self._comando_em_execucao = None
+        configuracoes = config_app.config_modulos.get("controle_musica", {})
+        if not isinstance(configuracoes, dict):
+            configuracoes = {}
+        self._playlist_ao_clicar = (
+            configuracoes.get("playlist_ao_clicar", True) is not False
+        )
 
         self.page = QWidget(app.pages_container)
         self.page.setGeometry(0, 0, 150, 150)
@@ -416,7 +569,7 @@ class Plugin(PluginBase):
             "QListWidget { background: transparent; border: none; }"
         )
         self.estado_playlist = QLabel(
-            "A fila não está disponível nesta sessão."
+            "O Windows não fornece a fila desta sessão."
         )
         self.estado_playlist.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.estado_playlist.setWordWrap(True)
@@ -438,6 +591,9 @@ class Plugin(PluginBase):
         self.timer_playlist.setSingleShot(True)
         self.timer_playlist.setInterval(10_000)
         self.timer_playlist.timeout.connect(self._voltar_capa)
+        self.timer_lista_playlist = QTimer(self.app)
+        self.timer_lista_playlist.setInterval(1000)
+        self.timer_lista_playlist.timeout.connect(self._atualizar_lista_playlist)
         self.timer_ocultar_overlay = QTimer(self.app)
         self.timer_ocultar_overlay.setSingleShot(True)
         self.timer_ocultar_overlay.setInterval(15_000)
@@ -546,6 +702,12 @@ class Plugin(PluginBase):
         self.timer_estado.setInterval(500)
         self.timer_estado.timeout.connect(self._atualizar_estado)
         self.timer_estado.start()
+        self._ponte_playlist = None
+        self._erro_ponte_playlist = ""
+        try:
+            self._ponte_playlist = PontePlaylistLocal()
+        except OSError as erro:
+            self._erro_ponte_playlist = str(erro)
         QTimer.singleShot(0, self.atualizar_sessoes)
 
     def criar_pagina(self):
@@ -553,6 +715,39 @@ class Plugin(PluginBase):
             self.page, chave="controle_musica", nome="Música"
         )
         return None
+
+    def abrir_configuracoes(self, parent=None):
+        dialogo = QDialog(parent or self.app)
+        dialogo.setWindowTitle("Configurações de Música")
+        layout = QVBoxLayout(dialogo)
+        check_playlist = QCheckBox(
+            "Abrir a playlist ao clicar na capa"
+        )
+        check_playlist.setChecked(self._playlist_ao_clicar)
+        layout.addWidget(check_playlist)
+        botoes = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        botoes.accepted.connect(dialogo.accept)
+        botoes.rejected.connect(dialogo.reject)
+        layout.addWidget(botoes)
+
+        if dialogo.exec() != QDialog.DialogCode.Accepted:
+            return True
+
+        configuracoes_modulos = dict(config_app.config_modulos)
+        configuracoes_musica = configuracoes_modulos.get("controle_musica", {})
+        if not isinstance(configuracoes_musica, dict):
+            configuracoes_musica = {}
+        else:
+            configuracoes_musica = dict(configuracoes_musica)
+        configuracoes_musica["playlist_ao_clicar"] = check_playlist.isChecked()
+        configuracoes_modulos["controle_musica"] = configuracoes_musica
+        config_app.config_modulos = configuracoes_modulos
+        config_app.salvar()
+        self._playlist_ao_clicar = check_playlist.isChecked()
+        return True
 
     def ao_mudar_area_pagina(self, area):
         x, y, largura, altura = area
@@ -610,6 +805,7 @@ class Plugin(PluginBase):
         self.timer_progresso.stop()
         self.timer_estado.stop()
         self.timer_playlist.stop()
+        self.timer_lista_playlist.stop()
         self.timer_ocultar_overlay.stop()
         self.app.removeEventFilter(self._filtro_janela)
         self.app.container.removeEventFilter(self._filtro_janela)
@@ -618,6 +814,9 @@ class Plugin(PluginBase):
         self.painel_capa.hide()
         self.painel_capa.deleteLater()
         self._animacao_capa.stop()
+        if self._ponte_playlist is not None:
+            self._ponte_playlist.close()
+            self._ponte_playlist = None
         return not any(
             worker is not None and worker.isRunning()
             for worker in (self._worker, self._worker_estado)
@@ -691,16 +890,71 @@ class Plugin(PluginBase):
             self._retorno_capa_apos_fade = False
 
     def _mostrar_playlist(self):
-        if self._encerrando or self._overlay_oculto:
+        if (
+            not self._playlist_ao_clicar
+            or self._encerrando
+            or self._overlay_oculto
+        ):
             return
-        self.lista_playlist.clear()
-        self.estado_playlist.setText(
-            "A fila de reprodução não é fornecida por esta sessão."
-        )
-        self.estado_playlist.show()
         self.pilha_capa.setCurrentWidget(self.pagina_playlist)
+        self._atualizar_lista_playlist()
+        self.timer_lista_playlist.start()
         self.timer_playlist.start()
         self.timer_ocultar_overlay.start()
+
+    def _atualizar_lista_playlist(self):
+        if self.pilha_capa.currentWidget() is not self.pagina_playlist:
+            return
+        if self._ponte_playlist is None:
+            self.lista_playlist.clear()
+            self.estado_playlist.setText(
+                "Ponte local indisponível. Feche outra instância do widget "
+                "ou libere a porta de integração."
+            )
+            self.estado_playlist.setToolTip(self._erro_ponte_playlist)
+            self.estado_playlist.show()
+            return
+
+        snapshot = self._ponte_playlist.snapshot()
+        if (
+            snapshot is None
+            or time.monotonic() - snapshot["received_at"] > 8
+        ):
+            self.lista_playlist.clear()
+            self.estado_playlist.setText(
+                "Instale/ative a extensão do Chrome e abra a fila ou playlist "
+                "no player."
+            )
+            self.estado_playlist.show()
+            return
+
+        faixas = snapshot["tracks"]
+        provedor = {
+            "spotify": "Spotify",
+            "youtube": "YouTube",
+            "youtube_music": "YouTube Music",
+            "soundcloud": "SoundCloud",
+        }[snapshot["provider"]]
+        titulo_lista = snapshot["list_title"] or "Lista atual"
+        self.estado_playlist.setText(
+            f"{provedor} · {titulo_lista} · {len(faixas)} faixas visíveis"
+            if faixas else
+            f"{provedor}: abra a fila/playlist para exibir as faixas."
+        )
+        self.estado_playlist.setToolTip("")
+        self.estado_playlist.setVisible(not faixas)
+        atual = [
+            f'{faixa["title"]} — {faixa["artist"]}'
+            if faixa["artist"] else faixa["title"]
+            for faixa in faixas
+        ]
+        existentes = [
+            self.lista_playlist.item(indice).text()
+            for indice in range(self.lista_playlist.count())
+        ]
+        if atual != existentes:
+            self.lista_playlist.clear()
+            self.lista_playlist.addItems(atual)
 
     def _voltar_capa(self):
         self.pilha_capa.setCurrentWidget(self.pagina_capa)
@@ -728,6 +982,7 @@ class Plugin(PluginBase):
                 self._comando_pendente = (comando, chave, valor, retomar)
             return
         if comando == "buscar":
+            self._seek_pendente = True
             self._busca_solicitada_em = datetime.now(timezone.utc)
         self._comando_em_execucao = comando
         self._worker = WorkerSessoesMedia(
@@ -1028,11 +1283,24 @@ class Plugin(PluginBase):
         return f"{horas}:{minutos:02d}:{segundos:02d}" if horas else f"{minutos}:{segundos:02d}"
 
     def _comando_concluido(self, sucesso):
+        if self._comando_em_execucao == "buscar" and not sucesso:
+            self._forcar_ticker_apos_busca = False
+            self._recuperar_reproducao_apos_busca = False
+            self._busca_em_confirmacao = False
+            self._busca_solicitada_em = None
+            self._tocando = False
         if not self._encerrando and self._comando_em_execucao != "alternar":
             self.atualizar_sessoes()
 
     def _mostrar_erro(self, mensagem):
         if not self._encerrando:
+            if self._comando_em_execucao == "buscar":
+                self._forcar_ticker_apos_busca = False
+                self._recuperar_reproducao_apos_busca = False
+                self._busca_em_confirmacao = False
+                self._busca_solicitada_em = None
+                self._tocando = False
+                self._atualizar_pendente = True
             self.titulo.setText("Controle de mídia indisponível")
             self.titulo.setToolTip(mensagem)
 

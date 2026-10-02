@@ -3,7 +3,7 @@ import sys
 import json
 import winreg
 
-APP_VERSION = "1.2.1"
+APP_VERSION = "1.2.2"
 URL_UPDATE_CHECK = "https://api.github.com/repos/DaviAlfeu/MussasWidget/contents/version.json"
 URL_DOWNLOAD_EXE = "https://github.com/DaviAlfeu/MussasWidget/raw/main/WidgetAniversarios.exe"
 URL_CSV_ANIVERSARIOS = "https://docs.google.com/spreadsheets/d/1W1cX9dCAFnLPjDImSB6rjSSC0GhvOX0rp_HiaHeHAGI/export?format=csv&gid=0"
@@ -65,6 +65,7 @@ class Configuracoes:
         self.tempo_parabens = 10
         self.posicao_bolinhas = "baixo"
         self.pagina_principal = ""
+        self.config_modulos = {}
         self.carregar()
 
     def carregar(self):
@@ -89,6 +90,10 @@ class Configuracoes:
                     self.tempo_parabens = max(10, min(20, int(d.get("tempo_parabens", 10))))
                     self.posicao_bolinhas = d.get("posicao_bolinhas", "baixo")
                     self.pagina_principal = d.get("pagina_principal", "")
+                    config_modulos = d.get("config_modulos", {})
+                    self.config_modulos = (
+                        config_modulos if isinstance(config_modulos, dict) else {}
+                    )
             except Exception:
                 pass
 

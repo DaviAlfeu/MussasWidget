@@ -4,7 +4,7 @@ from collections.abc import Callable
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QCheckBox, QLabel, QSlider, QHBoxLayout, 
     QPushButton, QComboBox, QWidget, QStackedWidget, QGridLayout, QScrollArea,
-    QApplication, QMessageBox, QInputDialog, QTabWidget, QStyle
+    QApplication, QMessageBox, QInputDialog, QTabWidget, QStyle, QDialogButtonBox
 )
 from PyQt6.QtCore import Qt, QEvent
 from PyQt6.QtGui import QColor, QPainter
@@ -383,8 +383,43 @@ class JanelaConfiguracoes(QDialog):
                 botao_acao.setToolTip("Arquivo local indisponível")
             acoes.append(botao_acao)
             layout_linha.addWidget(botao_acao)
+
+            if self.parent_widget.gerenciador_modulos.modulo_tem_configuracoes(nome):
+                botao_config = QPushButton("⚙")
+                botao_config.setFixedSize(26, 26)
+                botao_config.setToolTip("Configurar módulo")
+                botao_config.setProperty(
+                    "desabilitado_por_estado", estado != "ativo"
+                )
+                botao_config.setEnabled(estado == "ativo")
+                botao_config.clicked.connect(
+                    lambda checked=False, item=modulo:
+                    self.abrir_configuracoes_modulo(item)
+                )
+                acoes.append(botao_config)
+                layout_linha.addWidget(botao_config)
+
             self.layout_lista_modulos.addWidget(linha)
             self._botoes_modulos[nome] = acoes
+
+    def abrir_configuracoes_modulo(self, modulo):
+        gerenciador = self.parent_widget.gerenciador_modulos
+        try:
+            abriu = gerenciador.abrir_configuracoes_modulo(
+                modulo["nome"], self
+            )
+            if not abriu:
+                QMessageBox.warning(
+                    self,
+                    "Configurações do módulo",
+                    "Ative o módulo para abrir suas configurações.",
+                )
+        except Exception as erro:
+            QMessageBox.warning(
+                self,
+                "Configurações do módulo",
+                f"Não foi possível abrir as configurações:\n{erro}",
+            )
 
     def alterar_modulo(self, modulo, acao):
         if self._worker_modulos is not None and self._worker_modulos.isRunning():

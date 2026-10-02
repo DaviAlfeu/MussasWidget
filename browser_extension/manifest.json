@@ -1,0 +1,28 @@
+{
+  "manifest_version": 3,
+  "name": "MussasWidget Music Bridge",
+  "version": "1.0.0",
+  "description": "Passa para o MussasWidget as faixas de filas abertas em players Web.",
+  "background": {
+    "service_worker": "service_worker.js"
+  },
+  "host_permissions": [
+    "http://127.0.0.1:47832/*",
+    "https://open.spotify.com/*",
+    "https://www.youtube.com/*",
+    "https://music.youtube.com/*",
+    "https://soundcloud.com/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://open.spotify.com/*",
+        "https://www.youtube.com/*",
+        "https://music.youtube.com/*",
+        "https://soundcloud.com/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
