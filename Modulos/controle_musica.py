@@ -1,5 +1,6 @@
 import asyncio
 import time
+from datetime import datetime, timezone
 
 from PyQt6.QtCore import (
     QEvent, QObject, QPoint, QPropertyAnimation, QRectF, QThread, QTimer, Qt, QSize,
@@ -55,6 +56,7 @@ class CapaMusicaLabel(ClickableLabel):
 
 class WorkerSessoesMedia(QThread):
     sessoes_carregadas = pyqtSignal(object)
+    estado_carregado = pyqtSignal(object)
     comando_concluido = pyqtSignal(bool)
     erro = pyqtSignal(str)
 
@@ -69,6 +71,8 @@ class WorkerSessoesMedia(QThread):
             resultado = asyncio.run(self._executar())
             if self.comando is None:
                 self.sessoes_carregadas.emit(resultado)
+            elif self.comando == "estado":
+                self.estado_carregado.emit(resultado)
             else:
                 self.comando_concluido.emit(resultado)
         except Exception as erro:
@@ -82,6 +86,21 @@ class WorkerSessoesMedia(QThread):
 
         manager = await GlobalSystemMediaTransportControlsSessionManager.request_async()
         sessoes = list(manager.get_sessions())
+        if self.comando == "estado":
+            sessao = await self._localizar_sessao(sessoes)
+            if sessao is None:
+                return None
+            info_reproducao = sessao.get_playback_info()
+            tocando = (
+                info_reproducao.playback_status
+                == GlobalSystemMediaTransportControlsSessionPlaybackStatus.PLAYING
+            )
+            linha_tempo = sessao.get_timeline_properties()
+            return {
+                "tocando": tocando,
+                "posicao": self._posicao_linha_tempo(linha_tempo, tocando),
+                "capturado_em": time.monotonic(),
+            }
         if self.comando is not None:
             sessao_alvo = await self._localizar_sessao(sessoes)
             if sessao_alvo is None:
@@ -126,8 +145,13 @@ class WorkerSessoesMedia(QThread):
                     linha_tempo = sessao.get_timeline_properties()
                     inicio = self._segundos(linha_tempo.start_time)
                     fim = self._segundos(linha_tempo.end_time)
-                    posicao = self._segundos(linha_tempo.position) - inicio
+                    posicao = self._posicao_linha_tempo(
+                        linha_tempo,
+                        info_reproducao.playback_status
+                        == GlobalSystemMediaTransportControlsSessionPlaybackStatus.PLAYING,
+                    )
                     duracao = max(0, fim - inicio)
+                    capturado_em = time.monotonic()
                     pode_buscar = fim > inicio and (
                         self._segundos(linha_tempo.max_seek_time)
                         > self._segundos(linha_tempo.min_seek_time)
@@ -136,6 +160,7 @@ class WorkerSessoesMedia(QThread):
                     inicio = 0
                     posicao = 0
                     duracao = 0
+                    capturado_em = time.monotonic()
                     pode_buscar = False
                 identificador = fonte.lower()
                 fonte_musical = any(
@@ -162,6 +187,7 @@ class WorkerSessoesMedia(QThread):
                     "posicao": max(0, posicao),
                     "duracao": duracao,
                     "inicio": inicio,
+                    "capturado_em": capturado_em,
                     "pode_buscar": pode_buscar,
                     "pode_aleatorio": (
                         fonte_musical and controles.is_shuffle_enabled
@@ -196,6 +222,26 @@ class WorkerSessoesMedia(QThread):
         if hasattr(valor, "total_seconds"):
             return int(valor.total_seconds())
         return int(valor / 10_000_000)
+
+    @classmethod
+    def _posicao_linha_tempo(cls, linha_tempo, tocando):
+        posicao = (
+            cls._segundos_precisos(linha_tempo.position)
+            - cls._segundos_precisos(linha_tempo.start_time)
+        )
+        if tocando:
+            atualizado_em = linha_tempo.last_updated_time
+            segundos_desde_atualizacao = (
+                datetime.now(timezone.utc) - atualizado_em
+            ).total_seconds()
+            posicao += max(0, segundos_desde_atualizacao)
+        return max(0, int(posicao))
+
+    @staticmethod
+    def _segundos_precisos(valor):
+        if hasattr(valor, "total_seconds"):
+            return valor.total_seconds()
+        return valor / 10_000_000
 
     async def _ler_thumbnail(self, referencia):
         if referencia is None or DataReader is None:
@@ -253,11 +299,13 @@ class Plugin(PluginBase):
         super().__init__(app)
         self._encerrando = False
         self._worker = None
+        self._worker_estado = None
         self._atualizar_pendente = False
         self._sessoes = []
         self._arrastando_progresso = False
         self._posicao_base = 0
         self._inicio_relogio = time.monotonic()
+        self._ultima_atualizacao_estado = 0.0
         self._tocando = False
         self._imagem_capa = QPixmap()
         self._overlay_oculto = True
@@ -457,6 +505,10 @@ class Plugin(PluginBase):
         self.timer_progresso.setInterval(1000)
         self.timer_progresso.timeout.connect(self._atualizar_progresso)
         self.timer_progresso.start()
+        self.timer_estado = QTimer(self.app)
+        self.timer_estado.setInterval(500)
+        self.timer_estado.timeout.connect(self._atualizar_estado)
+        self.timer_estado.start()
         QTimer.singleShot(0, self.atualizar_sessoes)
 
     def criar_pagina(self):
@@ -519,6 +571,7 @@ class Plugin(PluginBase):
         self._encerrando = True
         self.timer_atualizar.stop()
         self.timer_progresso.stop()
+        self.timer_estado.stop()
         self.timer_playlist.stop()
         self.timer_ocultar_overlay.stop()
         self.app.removeEventFilter(self._filtro_janela)
@@ -528,7 +581,10 @@ class Plugin(PluginBase):
         self.painel_capa.hide()
         self.painel_capa.deleteLater()
         self._animacao_capa.stop()
-        return not (self._worker is not None and self._worker.isRunning())
+        return not any(
+            worker is not None and worker.isRunning()
+            for worker in (self._worker, self._worker_estado)
+        )
 
     def _criar_botao(self, icone, dica, comando, texto="", tamanho=24):
         botao = QPushButton()
@@ -639,6 +695,7 @@ class Plugin(PluginBase):
             comando, chave, valor=valor, parent=self.app
         )
         self._worker.sessoes_carregadas.connect(self._mostrar_sessoes)
+        self._worker.estado_carregado.connect(self._mostrar_estado)
         self._worker.comando_concluido.connect(self._comando_concluido)
         self._worker.erro.connect(self._mostrar_erro)
         self._worker.finished.connect(self._worker_finalizado)
@@ -714,13 +771,17 @@ class Plugin(PluginBase):
             self.capa.setPixmap(QPixmap())
             self.capa.setText("♪")
         self._tocando = sessao["tocando"]
+        self._ultima_atualizacao_estado = max(
+            self._ultima_atualizacao_estado, sessao["capturado_em"]
+        )
         self.progresso.setRange(0, sessao["duracao"])
         self.progresso.setEnabled(sessao["pode_buscar"])
         if not self._arrastando_progresso and not self._seek_pendente:
             self._posicao_base = sessao["posicao"]
-            self._inicio_relogio = time.monotonic()
-            self.progresso.setValue(sessao["posicao"])
-            self.tempo_atual.setText(self._formatar_tempo(sessao["posicao"]))
+            self._inicio_relogio = sessao["capturado_em"]
+            posicao = self._posicao_atual()
+            self.progresso.setValue(posicao)
+            self.tempo_atual.setText(self._formatar_tempo(posicao))
         self.tempo_total.setText(self._formatar_tempo(sessao["duracao"]))
         self.btn_anterior.setEnabled(sessao["pode_anterior"])
         self.btn_proxima.setEnabled(sessao["pode_proxima"])
@@ -775,6 +836,50 @@ class Plugin(PluginBase):
         if self.progresso.maximum() > 0:
             self.progresso.setValue(posicao)
 
+    def _atualizar_estado(self):
+        if self._encerrando or self._worker_estado is not None:
+            return
+        chave = self.combo_sessoes.currentData()
+        if chave is None:
+            return
+        worker = WorkerSessoesMedia("estado", chave, parent=self.app)
+        self._worker_estado = worker
+        worker.estado_carregado.connect(self._mostrar_estado)
+        worker.erro.connect(self._mostrar_erro)
+        worker.finished.connect(self._worker_estado_finalizado)
+        worker.finished.connect(worker.deleteLater)
+        worker.start()
+
+    def _worker_estado_finalizado(self):
+        self._worker_estado = None
+
+    def _mostrar_estado(self, estado):
+        if self._encerrando or estado is None:
+            return
+        if estado["capturado_em"] < self._ultima_atualizacao_estado:
+            return
+        chave = self.combo_sessoes.currentData()
+        sessao = next(
+            (item for item in self._sessoes if item["chave"] == chave), None
+        )
+        if sessao is None:
+            return
+        sessao["tocando"] = estado["tocando"]
+        sessao["posicao"] = estado["posicao"]
+        self._ultima_atualizacao_estado = estado["capturado_em"]
+        self._tocando = estado["tocando"]
+        self._posicao_base = estado["posicao"]
+        self._inicio_relogio = estado["capturado_em"]
+        if not self._arrastando_progresso and not self._seek_pendente:
+            posicao = self._posicao_atual()
+            self.tempo_atual.setText(self._formatar_tempo(posicao))
+            self.progresso.setValue(posicao)
+        icone = (
+            QStyle.StandardPixmap.SP_MediaPause
+            if self._tocando else QStyle.StandardPixmap.SP_MediaPlay
+        )
+        self.btn_play_pause.setIcon(QApplication.style().standardIcon(icone))
+
     def _posicao_atual(self):
         decorrido = int(time.monotonic() - self._inicio_relogio) if self._tocando else 0
         return min(self.progresso.maximum(), self._posicao_base + decorrido)
@@ -786,7 +891,7 @@ class Plugin(PluginBase):
         return f"{horas}:{minutos:02d}:{segundos:02d}" if horas else f"{minutos}:{segundos:02d}"
 
     def _comando_concluido(self, sucesso):
-        if not self._encerrando:
+        if not self._encerrando and self._comando_em_execucao != "alternar":
             self.atualizar_sessoes()
 
     def _mostrar_erro(self, mensagem):
