@@ -12,6 +12,8 @@ dist/
 config.json
 parabens_played.txt
 version.txt
+WidgetTasks.txt
+WidgetTasks.md
 
 # Ambiente virtual
 .venv/
