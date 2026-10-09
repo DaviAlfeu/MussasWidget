@@ -2,6 +2,7 @@ import os
 import ast
 import importlib.util
 import json
+import time
 import tempfile
 import urllib.request
 from PyQt6.QtCore import QThread, QTimer
@@ -37,13 +38,48 @@ def _extrair_versao_modulo(conteudo):
     return None
 
 
+CACHE_MODULOS = os.path.join(APPDATA_DIR, "modulos_github_cache.json")
+VALIDADE_CACHE_S = 600
+
+
+def _ler_cache():
+    try:
+        with open(CACHE_MODULOS, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def _obter_entradas_github():
+    cache = _ler_cache()
+    if isinstance(cache, dict) and isinstance(cache.get("entradas"), list):
+        if time.time() - float(cache.get("quando", 0)) < VALIDADE_CACHE_S:
+            return cache["entradas"]
+
+    try:
+        requisicao = urllib.request.Request(
+            URL_MODULOS_GITHUB,
+            headers={"Accept": "application/vnd.github+json", "User-Agent": "MussasWidget"}
+        )
+        with urllib.request.urlopen(requisicao, timeout=15) as resposta:
+            entradas = json.loads(resposta.read().decode("utf-8"))
+    except Exception:
+        # Limite da API (403) ou sem rede: usa o cache antigo, se existir
+        if isinstance(cache, dict) and isinstance(cache.get("entradas"), list):
+            return cache["entradas"]
+        raise
+
+    if isinstance(entradas, list):
+        try:
+            with open(CACHE_MODULOS, "w", encoding="utf-8") as f:
+                json.dump({"quando": time.time(), "entradas": entradas}, f)
+        except OSError:
+            pass
+    return entradas
+
+
 def listar_modulos_github():
-    requisicao = urllib.request.Request(
-        URL_MODULOS_GITHUB,
-        headers={"Accept": "application/vnd.github+json", "User-Agent": "MussasWidget"}
-    )
-    with urllib.request.urlopen(requisicao, timeout=15) as resposta:
-        entradas = json.loads(resposta.read().decode("utf-8"))
+    entradas = _obter_entradas_github()
 
     if not isinstance(entradas, list):
         raise ValueError("A resposta do GitHub não contém uma lista de módulos.")
