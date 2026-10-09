@@ -10,9 +10,10 @@ from PyQt6.QtWidgets import (
     QApplication, QWidget, QLabel, QFrame, QPushButton, 
     QHBoxLayout, QVBoxLayout, QGridLayout, QDialog, QCheckBox, 
     QSystemTrayIcon, QMenu, QGraphicsScene, QGraphicsBlurEffect,
-    QStackedWidget, QScrollArea, QComboBox, QSlider, QMessageBox,
+    QStackedWidget, QScrollArea, QComboBox, QSlider, QMessageBox, QProgressDialog,
     QFileDialog, QInputDialog, QFileIconProvider
 )
+from updater import baixar_atualizacao, iniciar_aplicacao_da_atualizacao, registrar_log, pasta_updates
 from PyQt6.QtCore import (
     Qt, QTimer, QUrl, QPoint, QRect, pyqtSignal,
     QPropertyAnimation, QParallelAnimationGroup, QEasingCurve, QAbstractAnimation, QEvent, QSharedMemory,
@@ -795,26 +796,27 @@ class WidgetFrutigerAero(QWidget):
             resposta_msg = QMessageBox.question(self, "Atualização disponível", f"Uma nova versão está disponível!\n\nAtual: {APP_VERSION}\nNova: {versao_remota}\n\nDeseja baixar e instalar agora?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.Yes)
             if resposta_msg != QMessageBox.StandardButton.Yes: return
                 
-            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-            temp_dir = pasta_temporaria_widget()
-            novo_exe = os.path.join(temp_dir, f"MussasWidget_new_{os.getpid()}.exe")
-            req_download = urllib.request.Request(url_download, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
-            
-            with urllib.request.urlopen(req_download, timeout=120) as resposta_download:
-                with open(novo_exe, "wb") as arquivo: arquivo.write(resposta_download.read())
-                    
-            if not os.path.exists(novo_exe) or os.path.getsize(novo_exe) < 100000:
-                try: os.remove(novo_exe)
-                except: pass
-                raise RuntimeError("O arquivo baixado parece estar incompleto ou corrompido.")
-                
-            QApplication.restoreOverrideCursor()
+            progresso = QProgressDialog("Baixando atualização...", None, 0, 100, self)
+            progresso.setWindowTitle("Atualizando")
+            progresso.setWindowModality(Qt.WindowModality.WindowModal)
+            progresso.setMinimumDuration(0)
+            progresso.setValue(0)
+
+            def ao_progresso(pct):
+                progresso.setValue(pct)
+                QApplication.processEvents()
+
+            try:
+                novo_exe = baixar_atualizacao(url_download, versao_remota, ao_progresso)
+            finally:
+                progresso.close()
+
             QMessageBox.information(self, "Download Concluído", "A atualização foi baixada com sucesso!\n\nO aplicativo será reiniciado agora.")
-            executar_atualizacao_bat(novo_exe)
+            iniciar_aplicacao_da_atualizacao(novo_exe)
             os._exit(0)
         except Exception as e:
-            QApplication.restoreOverrideCursor()
-            if manual: QMessageBox.critical(self, "Erro ao atualizar", "Não foi possível verificar ou instalar a atualização.\n\nDetalhes: " + str(e))
+            registrar_log(f"erro na atualizacao: {e!r}")
+            if manual: QMessageBox.critical(self, "Erro ao atualizar", "Não foi possível verificar ou instalar a atualização.\n\nDetalhes: " + str(e) + "\n\nLog: " + str(pasta_updates() / "update.log"))
 
     def fechar_painel_topo(self):
         if self.top_expanded: self.toggle_top_panel()
