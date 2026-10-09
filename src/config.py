@@ -33,6 +33,13 @@ os.makedirs(PASTA_WALLPAPERS, exist_ok=True)
 STATE_FILE = os.path.join(APPDATA_DIR, "parabens_played.txt")
 CONFIG_FILE = os.path.join(APPDATA_DIR, "config.json")
 
+TEMAS = {
+    "claro": ("Claro", True, "#f5f5f5"),
+    "escuro": ("Escuro", False, "#191919"),
+    "azul_claro": ("Azul", True, "#78a5c4"),
+    "azul_escuro": ("Azul Escuro", False, "#30424e"),
+}
+
 NIVEIS_DESFOQUE = [0, 20, 40, 60, 80, 100]
 NIVEIS_ESPESSURA = [0.0, 0.5, 1.0, 1.5, 2.0]
 
@@ -51,6 +58,7 @@ class Configuracoes:
         self.iniciar_com_windows = False
         self.segundo_plano = False
         self.sempre_no_topo = False
+        self.tema = "escuro"
         self.modo_claro = False
         self.wallpaper = "Nenhum"
         self.desfoque = 20
@@ -64,6 +72,7 @@ class Configuracoes:
         self.voltar_pagina_principal = True
         self.tempo_parabens = 10
         self.posicao_bolinhas = "baixo"
+        self.indicador_pagina = "bolinhas"
         self.pagina_principal = ""
         self.config_modulos = {}
         self.carregar()
@@ -76,7 +85,10 @@ class Configuracoes:
                     self.iniciar_com_windows = d.get("iniciar_com_windows", False)
                     self.segundo_plano = d.get("segundo_plano", False)
                     self.sempre_no_topo = d.get("sempre_no_topo", False)
-                    self.modo_claro = d.get("modo_claro", False)
+                    tema = d.get("tema")
+                    if tema not in TEMAS:
+                        tema = "claro" if d.get("modo_claro", False) else "escuro"
+                    self.definir_tema(tema)
                     self.wallpaper = d.get("wallpaper", "Nenhum")
                     self.desfoque = NIVEIS_DESFOQUE[indice_desfoque(d.get("desfoque", 20))]
                     self.espessura_borda = NIVEIS_ESPESSURA[indice_espessura(d.get("espessura_borda", 1.0))]
@@ -89,6 +101,8 @@ class Configuracoes:
                     self.voltar_pagina_principal = d.get("voltar_pagina_principal", True)
                     self.tempo_parabens = max(10, min(20, int(d.get("tempo_parabens", 10))))
                     self.posicao_bolinhas = d.get("posicao_bolinhas", "baixo")
+                    indicador = d.get("indicador_pagina", "bolinhas")
+                    self.indicador_pagina = indicador if indicador in ("bolinhas", "numeros") else "bolinhas"
                     self.pagina_principal = d.get("pagina_principal", "")
                     config_modulos = d.get("config_modulos", {})
                     self.config_modulos = (
@@ -96,6 +110,16 @@ class Configuracoes:
                     )
             except Exception:
                 pass
+
+    def definir_tema(self, tema):
+        if tema not in TEMAS:
+            tema = "escuro"
+        self.tema = tema
+        self.modo_claro = TEMAS[tema][1]
+
+    @property
+    def cor_base(self):
+        return TEMAS[self.tema][2]
 
     def salvar(self):
         try:

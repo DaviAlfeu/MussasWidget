@@ -15,6 +15,8 @@ a = Analysis(
         'winrt.windows.foundation.collections',
         'winrt.windows.media.control',
         'winrt.windows.storage.streams',
+        'openpyxl',
+        'xlrd',
     ],
     hookspath=[],
     hooksconfig={},

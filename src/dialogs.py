@@ -1,24 +1,25 @@
 import os
 import sys
 from collections.abc import Callable
+from datetime import date
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QCheckBox, QLabel, QSlider, QHBoxLayout, 
     QPushButton, QComboBox, QWidget, QStackedWidget, QGridLayout, QScrollArea,
     QApplication, QMessageBox, QInputDialog, QTabWidget, QStyle, QDialogButtonBox
 )
-from PyQt6.QtCore import Qt, QEvent
-from PyQt6.QtGui import QColor, QPainter
+from PyQt6.QtCore import Qt, QEvent, QPoint, QRect, QTimer
+from PyQt6.QtGui import QColor, QPainter, QFont, QPixmap, QPainterPath
 
 from config import (
     config_app, APP_VERSION, PASTA_WALLPAPERS, 
     NIVEIS_DESFOQUE, NIVEIS_ESPESSURA, indice_desfoque, indice_espessura,
-    MARGEM_SEGURANCA_BOLINHAS
+    MARGEM_SEGURANCA_BOLINHAS, TEMAS
 )
 from utils import (
     raio_desfoque, normalizar_cor_hex, aplicar_css_fonte_base, alpha_desfoque,
     versao_tuple
 )
-from ui_components import BlurredBackgroundFrame, OutlineLabel, ClickableMes, ClickableLabel
+from ui_components import BlurredBackgroundFrame, OutlineLabel, ClickableMes, ClickableLabel, MarqueeLabel, WrapLabel
 from gerenciador_modulos import PASTA_MODULOS, estado_modulo
 from workers import WorkerModulosGitHub
 
@@ -28,14 +29,16 @@ class PreviewBolinhas(QWidget):
         super().__init__(parent)
         self.posicao = "baixo"
         self.modo_claro = False
+        self.estilo = "bolinhas"
         self.setGeometry(parent.rect())
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.setStyleSheet("background: transparent;")
 
-    def set_preferencias(self, posicao, modo_claro):
+    def set_preferencias(self, posicao, modo_claro, estilo="bolinhas"):
         self.posicao = posicao
         self.modo_claro = modo_claro
+        self.estilo = estilo
         self.update()
 
     def paintEvent(self, event):
@@ -43,25 +46,37 @@ class PreviewBolinhas(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setPen(Qt.PenStyle.NoPen)
         escala = min(self.width(), self.height()) / 150
-        tamanho = max(3, round(6 * escala))
-        espacamento = max(1, round(8 * escala))
+        tamanho = max(6, round(18 * escala))
         margem = round(MARGEM_SEGURANCA_BOLINHAS * escala)
-        recuo = (margem - tamanho) // 2
-        total = tamanho * 3 + espacamento * 2
+        fundo = QColor("#202124") if self.modo_claro else QColor("#ffffff")
+        fundo.setAlpha(204)
+        texto = QColor("#ffffff") if self.modo_claro else QColor("#111111")
+        if self.estilo == "numeros":
+            dimensao = tamanho
+            espacamento = 0
+        else:
+            dimensao = max(3, round(6 * escala))
+            espacamento = max(1, round(8 * escala))
+        total = dimensao * (1 if self.estilo == "numeros" else 3)
+        if self.estilo == "bolinhas":
+            total += espacamento * 2
         inicio = (self.width() - total) // 2
-        for indice in range(3):
+        for indice in range(1 if self.estilo == "numeros" else 3):
             if self.posicao in ("baixo", "cima"):
-                x = inicio + indice * (tamanho + espacamento)
-                y = recuo if self.posicao == "cima" else self.height() - margem + recuo
+                x = inicio + indice * (dimensao + espacamento)
+                y = round(4 * escala) if self.posicao == "cima" else self.height() - margem - dimensao
             else:
-                x = recuo if self.posicao == "esquerda" else self.width() - margem + recuo
-                y = inicio + indice * (tamanho + espacamento)
-            if indice == 0:
-                cor = QColor("#202124") if self.modo_claro else QColor("#ffffff")
+                x = round(4 * escala) if self.posicao == "esquerda" else self.width() - margem - dimensao
+                y = inicio + indice * (dimensao + espacamento)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(fundo if self.estilo == "numeros" or indice == 0 else QColor("#9aa0a6"))
+            if self.estilo == "numeros":
+                painter.drawEllipse(x, y, dimensao, dimensao)
+                painter.setPen(texto)
+                painter.setFont(QFont("Segoe UI", max(6, round(8 * escala)), QFont.Weight.Bold))
+                painter.drawText(x, y, dimensao, dimensao, Qt.AlignmentFlag.AlignCenter, "1")
             else:
-                cor = QColor("#9aa0a6")
-            painter.setBrush(cor)
-            painter.drawEllipse(x, y, tamanho, tamanho)
+                painter.drawEllipse(x, y, dimensao, dimensao)
 
 
 class JanelaConfiguracoes(QDialog):
@@ -83,8 +98,10 @@ class JanelaConfiguracoes(QDialog):
         pagina_modulos = QWidget()
         layout_modulos = QVBoxLayout(pagina_modulos)
         
-        self.check_tema = QCheckBox("Modo Claro")
-        self.check_tema.setChecked(config_app.modo_claro)
+        self.combo_tema = QComboBox()
+        for chave, (nome, _, _) in TEMAS.items():
+            self.combo_tema.addItem(nome, chave)
+        self.combo_tema.setCurrentIndex(max(0, self.combo_tema.findData(config_app.tema)))
         
         self.check_windows = QCheckBox("Iniciar junto com o Windows")
         self.check_windows.setChecked(config_app.iniciar_com_windows)
@@ -113,6 +130,11 @@ class JanelaConfiguracoes(QDialog):
             self.combo_posicao_bolinhas.addItem(rotulo, valor)
         indice_posicao = self.combo_posicao_bolinhas.findData(config_app.posicao_bolinhas)
         self.combo_posicao_bolinhas.setCurrentIndex(max(0, indice_posicao))
+        self.combo_estilo_indicador = QComboBox()
+        self.combo_estilo_indicador.addItem("Bolinhas", "bolinhas")
+        self.combo_estilo_indicador.addItem("Números", "numeros")
+        indice_estilo = self.combo_estilo_indicador.findData(config_app.indicador_pagina)
+        self.combo_estilo_indicador.setCurrentIndex(max(0, indice_estilo))
 
         self.lbl_tempo_parabens = QLabel()
         self.slider_tempo_parabens = QSlider(Qt.Orientation.Horizontal)
@@ -155,7 +177,8 @@ class JanelaConfiguracoes(QDialog):
         self.preview_frame.setFixedSize(100, 100) 
         self.preview_bolinhas = PreviewBolinhas(self.preview_frame)
         self.preview_bolinhas.set_preferencias(
-            self.combo_posicao_bolinhas.currentData(), self.check_tema.isChecked()
+            self.combo_posicao_bolinhas.currentData(), TEMAS[self.combo_tema.currentData()][1],
+            self.combo_estilo_indicador.currentData(),
         )
         self.preview_bolinhas.raise_()
         
@@ -186,7 +209,8 @@ class JanelaConfiguracoes(QDialog):
         self._operacao_modulos = "listar"
         self.btn_atualizar_lista_modulos.clicked.connect(self.atualizar_lista_modulos)
         
-        layout_personalizacao.addWidget(self.check_tema)
+        layout_personalizacao.addWidget(QLabel("Tema:"))
+        layout_personalizacao.addWidget(self.combo_tema)
         layout_personalizacao.addSpacing(6)
         layout_personalizacao.addLayout(layout_wp_top)
         layout_personalizacao.addWidget(self.combo_wp)
@@ -194,7 +218,9 @@ class JanelaConfiguracoes(QDialog):
         layout_personalizacao.addWidget(self.slider_blur)
         layout_personalizacao.addWidget(self.lbl_espessura)
         layout_personalizacao.addWidget(self.slider_esp)
-        layout_personalizacao.addWidget(QLabel("Posição das bolinhas:"))
+        layout_personalizacao.addWidget(QLabel("Estilo do indicador de página:"))
+        layout_personalizacao.addWidget(self.combo_estilo_indicador)
+        layout_personalizacao.addWidget(QLabel("Posição do indicador de página:"))
         layout_personalizacao.addWidget(self.combo_posicao_bolinhas)
         layout_personalizacao.addWidget(self.preview_frame, alignment=Qt.AlignmentFlag.AlignCenter)
         layout_personalizacao.addStretch()
@@ -216,9 +242,10 @@ class JanelaConfiguracoes(QDialog):
         abas.addTab(pagina_gerais, "Gerais")
         abas.addTab(pagina_modulos, "Módulos")
         
-        self.check_tema.toggled.connect(self.atualizar_preview)
-        self.check_tema.toggled.connect(self.atualizar_preview_bolinhas)
+        self.combo_tema.currentIndexChanged.connect(self.atualizar_preview)
+        self.combo_tema.currentIndexChanged.connect(self.atualizar_preview_bolinhas)
         self.combo_posicao_bolinhas.currentIndexChanged.connect(self.atualizar_posicao_bolinhas)
+        self.combo_estilo_indicador.currentIndexChanged.connect(self.atualizar_estilo_indicador)
         self.combo_wp.currentTextChanged.connect(self.atualizar_preview)
         self.slider_blur.valueChanged.connect(self.atualizar_preview)
         self.slider_esp.valueChanged.connect(self.atualizar_preview)
@@ -229,11 +256,21 @@ class JanelaConfiguracoes(QDialog):
 
     def atualizar_preview_bolinhas(self):
         self.preview_bolinhas.set_preferencias(
-            self.combo_posicao_bolinhas.currentData(), self.check_tema.isChecked()
+            self.combo_posicao_bolinhas.currentData(), TEMAS[self.combo_tema.currentData()][1],
+            self.combo_estilo_indicador.currentData(),
         )
+
+    def atualizar_estilo_indicador(self):
+        config_app.indicador_pagina = self.combo_estilo_indicador.currentData()
+        self.preview_bolinhas.set_preferencias(
+            self.combo_posicao_bolinhas.currentData(), TEMAS[self.combo_tema.currentData()][1],
+            config_app.indicador_pagina,
+        )
+        self.parent_widget._criar_dots_pagina()
 
     def atualizar_posicao_bolinhas(self):
         config_app.posicao_bolinhas = self.combo_posicao_bolinhas.currentData()
+        config_app.indicador_pagina = self.combo_estilo_indicador.currentData()
         self.atualizar_preview_bolinhas()
         self.parent_widget._criar_dots_pagina()
 
@@ -446,7 +483,8 @@ class JanelaConfiguracoes(QDialog):
         self.lbl_tempo_parabens.setText(f"Duração da tela de Parabéns: {self.slider_tempo_parabens.value()}s")
 
     def atualizar_preview(self):
-        claro = self.check_tema.isChecked()
+        claro = TEMAS[self.combo_tema.currentData()][1]
+        cor_base = TEMAS[self.combo_tema.currentData()][2]
         wp_nome = self.combo_wp.currentText()
         wp_path = os.path.join(PASTA_WALLPAPERS, wp_nome) if wp_nome != "Nenhum" else "Nenhum"
         tem_wp = wp_nome != "Nenhum" and os.path.exists(wp_path)
@@ -459,9 +497,9 @@ class JanelaConfiguracoes(QDialog):
             overlay = (255, 255, 255, 25) if claro else (0, 0, 0, 25)
             border = (0, 0, 0, 100) if claro else (255, 255, 255, 100)
         else:
-            overlay = (245, 245, 245, 180) if claro else (25, 25, 25, 175)
-            border = (255, 255, 255, 200) if claro else (255, 255, 255, 50)
-        self.preview_frame.update_background(wp_path, raio_desfoque(blur_percent), overlay, border, 12, modo_claro=claro)
+            overlay = (0, 0, 0, 0)
+            border = (0, 0, 0, 0)
+        self.preview_frame.update_background(wp_path, raio_desfoque(blur_percent), overlay, border, 12, modo_claro=claro, cor_base=cor_base)
         if not tem_wp:
             fundo_preview = QColor(self.preview_frame.overlay_color)
             fundo_preview.setAlpha(255)
@@ -469,7 +507,7 @@ class JanelaConfiguracoes(QDialog):
             self.preview_frame.update()
 
     def closeEvent(self, event):
-        config_app.modo_claro = self.check_tema.isChecked()
+        config_app.definir_tema(self.combo_tema.currentData())
         config_app.iniciar_com_windows = self.check_windows.isChecked()
         config_app.segundo_plano = self.check_plano.isChecked()
         config_app.sempre_no_topo = self.check_topo.isChecked()
@@ -494,13 +532,67 @@ class JanelaConfiguracoes(QDialog):
             self.parent_widget.timer_inatividade.stop()
 
 
+LARGURA_ITEM_LISTA = 122
+
+ESTILO_SCROLL_LIMPO = (
+    "QScrollArea { background: transparent; border: none; }"
+    "QScrollBar:vertical { background: transparent; width: 4px; margin: 2px 0; border: none; }"
+    "QScrollBar::handle:vertical { background: rgba(160, 160, 160, 120); border-radius: 2px; min-height: 20px; }"
+    "QScrollBar::handle:vertical:hover { background: rgba(200, 200, 200, 180); }"
+    "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; background: none; border: none; }"
+    "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }"
+)
+
+
+class PaginaDetalheEvento(QWidget):
+    """Página de detalhe com a imagem cobrindo toda a área."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._pixmap = QPixmap()
+
+    def definir_imagem(self, pixmap):
+        self._pixmap = pixmap
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        caminho = QPainterPath()
+        caminho.addRoundedRect(0, 0, self.width(), self.height(), 12, 12)
+        painter.setClipPath(caminho)
+        if self._pixmap.isNull():
+            return
+        escalada = self._pixmap.scaled(
+            self.size(), Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        x = (self.width() - escalada.width()) // 2
+        y = (self.height() - escalada.height()) // 2
+        painter.drawPixmap(x, y, escalada)
+        painter.fillRect(self.rect(), QColor(0, 0, 0, 90))
+
+
 class JanelaCalendario(QWidget):
-    def __init__(self, reiniciar_timer: Callable[[], None]):
+    def __init__(
+        self,
+        reiniciar_timer: Callable[[], None],
+        adicionar_evento: Callable[[int], None] | None = None,
+        excluir_evento: Callable[[str], bool] | None = None,
+    ):
         super().__init__()
         self._reiniciar_timer = reiniciar_timer
+        self._adicionar_evento = adicionar_evento
+        self._excluir_evento = excluir_evento
+        self._referencia_widget = None
+        self._timer_reposicionar = QTimer(self)
+        self._timer_reposicionar.setSingleShot(True)
+        self._timer_reposicionar.setInterval(40)
+        self._timer_reposicionar.timeout.connect(self._reposicionar_na_referencia)
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setFixedWidth(150)
+        self._altura_preferida = 140
         
         self.container = BlurredBackgroundFrame(self)
         self.container.setGeometry(0, 0, 150, 140)
@@ -528,17 +620,32 @@ class JanelaCalendario(QWidget):
         
         top_list = QHBoxLayout()
         top_list.setContentsMargins(0, 0, 0, 0)
+        espaco_esquerdo = QWidget()
+        espaco_esquerdo.setFixedSize(24, 24)
+        top_list.addWidget(espaco_esquerdo)
         self.lbl_titulo_mes = OutlineLabel("Mês")
         self.lbl_titulo_mes.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        top_list.addWidget(self.lbl_titulo_mes)
+        top_list.addWidget(self.lbl_titulo_mes, 1)
+        self.btn_adicionar_evento = QPushButton("+")
+        self.btn_adicionar_evento.setFixedSize(24, 24)
+        self.btn_adicionar_evento.setToolTip("Adicionar evento neste mês")
+        self.btn_adicionar_evento.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_adicionar_evento.setStyleSheet(
+            "QPushButton { background: rgba(120, 120, 120, 80); border: none; border-radius: 6px; }"
+            "QPushButton:hover { background: rgba(120, 120, 120, 150); }"
+        )
+        self.btn_adicionar_evento.clicked.connect(self._pedir_adicao_evento)
+        self.btn_adicionar_evento.setVisible(adicionar_evento is not None)
+        top_list.addWidget(self.btn_adicionar_evento)
         
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
-        self.scroll.setStyleSheet("background: transparent; border: none;")
+        self.scroll.setStyleSheet(ESTILO_SCROLL_LIMPO)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.scroll_content = QWidget()
         self.scroll_content.setStyleSheet("background: transparent;")
         self.layout_nomes = QVBoxLayout(self.scroll_content)
-        self.layout_nomes.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self.layout_nomes.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
         self.scroll.setWidget(self.scroll_content)
 
         for widget in (self.page_grid, self.page_list, self.lbl_titulo_mes, self.scroll, self.scroll.viewport(), self.scroll_content):
@@ -548,9 +655,41 @@ class JanelaCalendario(QWidget):
         
         layout_list.addLayout(top_list)
         layout_list.addWidget(self.scroll)
-        
+
+        self.page_detalhe = PaginaDetalheEvento()
+        layout_detalhe = QVBoxLayout(self.page_detalhe)
+        layout_detalhe.setContentsMargins(5, 5, 5, 5)
+        topo_detalhe = QHBoxLayout()
+        topo_detalhe.setContentsMargins(0, 0, 0, 0)
+        self.btn_voltar_evento = QPushButton("‹")
+        self.btn_voltar_evento.setFixedSize(24, 24)
+        self.btn_voltar_evento.clicked.connect(lambda: self.stacked.setCurrentIndex(1))
+        self.lbl_titulo_evento = WrapLabel("")
+        self.lbl_titulo_evento.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.btn_excluir_evento = QPushButton("−")
+        self.btn_excluir_evento.setFixedSize(24, 24)
+        self.btn_excluir_evento.setToolTip("Excluir este evento")
+        self.btn_excluir_evento.clicked.connect(self._pedir_exclusao_evento)
+        for botao in (self.btn_voltar_evento, self.btn_excluir_evento):
+            botao.setCursor(Qt.CursorShape.PointingHandCursor)
+            botao.setStyleSheet(
+                "QPushButton { background: rgba(120, 120, 120, 80); border: none; border-radius: 6px; }"
+                "QPushButton:hover { background: rgba(180, 35, 35, 150); }"
+            )
+        topo_detalhe.addWidget(self.btn_voltar_evento)
+        topo_detalhe.addStretch(1)
+        topo_detalhe.addWidget(self.btn_excluir_evento)
+        self.lbl_dias_evento = OutlineLabel("")
+        self.lbl_dias_evento.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout_detalhe.addLayout(topo_detalhe)
+        layout_detalhe.addWidget(self.lbl_titulo_evento, alignment=Qt.AlignmentFlag.AlignHCenter)
+        layout_detalhe.addStretch(1)
+        layout_detalhe.addWidget(self.lbl_dias_evento)
+        layout_detalhe.addStretch(1)
+
         self.stacked.addWidget(self.page_grid)
         self.stacked.addWidget(self.page_list)
+        self.stacked.addWidget(self.page_detalhe)
         self.resize(150, 140)
 
         self.dados = []
@@ -559,18 +698,30 @@ class JanelaCalendario(QWidget):
         self.esp_borda = 0
 
     def abrir_mes(self, mes_num):
+        self._mes_atual = mes_num
         for i in reversed(range(self.layout_nomes.count())): 
-            w = self.layout_nomes.itemAt(i).widget()
-            if w: w.setParent(None)
+            item = self.layout_nomes.takeAt(i)
+            widget = item.widget()
+            if widget:
+                widget.hide()
+                widget.setParent(None)
+                widget.deleteLater()
             
         aniversariantes = []
         for item in self.dados:
             try:
                 nome, data_str = item[0], item[1]
                 cor_nome = item[2] if len(item) >= 3 else "#ffffff"
-                d, m = map(int, data_str.split('/'))
+                partes = str(data_str).split('/')
+                d, m = int(partes[0]), int(partes[1])
                 if m == mes_num:
-                    aniversariantes.append((nome, d, normalizar_cor_hex(cor_nome)))
+                    imagem = item[3] if len(item) >= 4 else ""
+                    recorrente = bool(item[4]) if len(item) >= 5 else True
+                    event_id = str(item[5]) if len(item) >= 6 and item[5] else ""
+                    aniversariantes.append((
+                        nome, d, normalizar_cor_hex(cor_nome), imagem,
+                        recorrente, data_str, event_id,
+                    ))
             except Exception:
                 pass
             
@@ -582,20 +733,155 @@ class JanelaCalendario(QWidget):
             vazio = OutlineLabel("Sem aniversários")
             vazio.setAlignment(Qt.AlignmentFlag.AlignCenter)
             vazio.atualizar_estilo(aplicar_css_fonte_base("cal_lista"), self.cor_texto, self.borda_cor, self.esp_borda)
-            self.layout_nomes.addWidget(vazio)
+            self.layout_nomes.addWidget(vazio, alignment=Qt.AlignmentFlag.AlignHCenter)
             vazio.installEventFilter(self)
         else:
-            for nome, dia, cor in aniversariantes:
-                lbl = OutlineLabel(f"{nome} - {dia}")
-                lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                lbl.atualizar_estilo(aplicar_css_fonte_base("cal_lista"), cor, self.borda_cor, self.esp_borda)
-                self.layout_nomes.addWidget(lbl)
-                lbl.installEventFilter(self)
-                
+            for nome, dia, cor, imagem, recorrente, data_str, event_id in aniversariantes:
+                if event_id:
+                    botao = MarqueeLabel(f"{nome} - {dia}", clicavel=True)
+                    botao.setFixedSize(LARGURA_ITEM_LISTA, 20)
+                    botao.setCursor(Qt.CursorShape.PointingHandCursor)
+                    botao.atualizar_estilo(
+                        aplicar_css_fonte_base("cal_lista"), cor, self.borda_cor, self.esp_borda
+                    )
+                    botao.clicked.connect(
+                        lambda checked=False, evento=(
+                            nome, data_str, cor, imagem, recorrente, event_id
+                        ): self.mostrar_detalhe_evento(evento)
+                    )
+                    self.layout_nomes.addWidget(botao, alignment=Qt.AlignmentFlag.AlignHCenter)
+                else:
+                    rotulo = MarqueeLabel(f"{nome} - {dia}")
+                    rotulo.setFixedSize(LARGURA_ITEM_LISTA, 20)
+                    rotulo.atualizar_estilo(
+                        aplicar_css_fonte_base("cal_lista"), cor, self.borda_cor, self.esp_borda
+                    )
+                    self.layout_nomes.addWidget(rotulo, alignment=Qt.AlignmentFlag.AlignHCenter)
+
         self.stacked.setCurrentIndex(1)
         self._reiniciar_timer()
 
+    def _pedir_adicao_evento(self):
+        if self._adicionar_evento is not None and self.stacked.currentIndex() == 1:
+            self._adicionar_evento(self._mes_atual)
+
+    def mostrar_detalhe_evento(self, evento):
+        nome, data_str, cor, imagem, recorrente, event_id = evento
+        self.lbl_titulo_evento.setText(nome)
+        self.lbl_titulo_evento.atualizar_estilo(
+            aplicar_css_fonte_base("cal_titulo"), cor, self.borda_cor, self.esp_borda
+        )
+        partes = str(data_str).split("/")
+        dia, mes = int(partes[0]), int(partes[1])
+        ano = int(partes[2]) if len(partes) > 2 else None
+        hoje = date.today()
+        if recorrente or ano is None:
+            proximo = None
+            for candidato_ano in range(hoje.year, hoje.year + 9):
+                try:
+                    candidato = date(candidato_ano, mes, dia)
+                except ValueError:
+                    continue
+                if candidato >= hoje:
+                    proximo = candidato
+                    break
+            dias = (proximo - hoje).days if proximo else None
+        else:
+            try:
+                data_evento = date(ano, mes, dia)
+                dias = (data_evento - hoje).days
+            except ValueError:
+                dias = None
+        self.lbl_dias_evento.setText(
+            "Data inválida" if dias is None else
+            ("Evento já passou" if dias < 0 else
+             ("Hoje" if dias == 0 else f"Faltam {dias} dias"))
+        )
+        self.lbl_dias_evento.atualizar_estilo(
+            aplicar_css_fonte_base("cal_lista"), self.cor_texto, self.borda_cor, self.esp_borda
+        )
+        pixmap = QPixmap(imagem) if imagem and os.path.isfile(imagem) else QPixmap()
+        self.page_detalhe.definir_imagem(pixmap)
+        cor_titulo = '#ffffff' if not pixmap.isNull() else cor
+        self.lbl_titulo_evento.atualizar_estilo(aplicar_css_fonte_base('cal_titulo'), cor_titulo, self.borda_cor, self.esp_borda)
+        if not pixmap.isNull():
+            self.lbl_dias_evento.atualizar_estilo(aplicar_css_fonte_base('cal_lista'), '#ffffff', self.borda_cor, self.esp_borda)
+        self.lbl_titulo_evento.ajustar_para_largura(140)
+        self._evento_selecionado_id = event_id
+        self.btn_excluir_evento.setVisible(bool(event_id and self._excluir_evento))
+        self.stacked.setCurrentIndex(2)
+        self._reiniciar_timer()
+
+    def _pedir_exclusao_evento(self):
+        event_id = getattr(self, "_evento_selecionado_id", "")
+        if not event_id or self._excluir_evento is None:
+            return
+        resposta = QMessageBox.question(
+            self, "Excluir evento", "Deseja excluir este evento?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if resposta == QMessageBox.StandardButton.Yes and self._excluir_evento(event_id):
+            self.abrir_mes(self._mes_atual)
+
+    def set_referencia_widget(self, widget):
+        if self._referencia_widget is not None:
+            self._referencia_widget.removeEventFilter(self)
+        self._referencia_widget = widget
+        if widget is not None:
+            widget.installEventFilter(self)
+
+    def _reposicionar_na_referencia(self):
+        if self._referencia_widget is None or not self.isVisible():
+            return
+        origem = self._referencia_widget.mapToGlobal(QPoint(0, 0))
+        self.ajustar_posicao_ao_espaco(
+            QRect(origem.x(), origem.y(), self._referencia_widget.width(), self._referencia_widget.height())
+        )
+
+    def ajustar_posicao_ao_espaco(self, referencia):
+        if not referencia:
+            return
+        tela_principal = QApplication.screenAt(referencia.center()) or QApplication.primaryScreen()
+        if tela_principal is None:
+            return
+        tela = tela_principal.availableGeometry()
+        margem = 6
+        espacamento = 4
+        largura = self.width()
+        abaixo = referencia.bottom() + 1 + espacamento
+        espaco_abaixo = tela.bottom() + 1 - margem - abaixo
+        espaco_acima = referencia.top() - espacamento - (tela.top() + margem)
+        if max(espaco_abaixo, espaco_acima) >= self._altura_preferida:
+            altura = self._altura_preferida
+        else:
+            altura = max(40, min(self._altura_preferida, max(espaco_abaixo, espaco_acima)))
+        if self.height() != altura:
+            self.setFixedHeight(altura)
+            self.container.setGeometry(0, 0, largura, altura)
+            self.stacked.setGeometry(0, 0, largura, altura)
+        acima = referencia.top() - altura - espacamento
+        if espaco_abaixo >= altura:
+            topo = abaixo
+        elif espaco_acima >= altura:
+            topo = acima
+        else:
+            if espaco_abaixo >= espaco_acima:
+                topo = abaixo
+            else:
+                topo = referencia.top() - espacamento - altura
+        topo = max(tela.top() + margem, min(topo, tela.bottom() + 1 - altura - margem))
+        esquerda = referencia.center().x() - largura // 2
+        esquerda = max(tela.left() + margem, min(esquerda, tela.right() + 1 - largura - margem))
+        self.setGeometry(esquerda, topo, largura, altura)
+
     def eventFilter(self, obj, event):
+        if obj is self._referencia_widget and event.type() in (
+            QEvent.Type.Move, QEvent.Type.Resize,
+        ):
+            if self.isVisible():
+                self._timer_reposicionar.start()
+            return False
         if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
             self._reiniciar_timer()
             if self.stacked.currentIndex() == 1:
@@ -603,12 +889,12 @@ class JanelaCalendario(QWidget):
                 return True
         return super().eventFilter(obj, event)
 
-    def atualizar_dados(self, dados, cor_texto, overlay_color, border_color, wp_path, blur, borda_cor=None, esp_borda=0, modo_claro=False):
+    def atualizar_dados(self, dados, cor_texto, overlay_color, border_color, wp_path, blur, borda_cor=None, esp_borda=0, modo_claro=False, cor_base=None):
         self.dados = dados
         self.cor_texto = cor_texto
         self.borda_cor = borda_cor
         self.esp_borda = esp_borda
-        self.container.update_background(wp_path, blur, overlay_color, border_color, 12, modo_claro=modo_claro)
+        self.container.update_background(wp_path, blur, overlay_color, border_color, 12, modo_claro=modo_claro, cor_base=cor_base)
         
         meses_com_aniv = set()
         for item in dados:
@@ -626,3 +912,5 @@ class JanelaCalendario(QWidget):
             else:
                 lbl.setCursor(Qt.CursorShape.PointingHandCursor)
             lbl.setStyleSheet(lbl.styleSheet() + bg_css)
+        if self.stacked.currentIndex() == 1 and hasattr(self, "_mes_atual"):
+            self.abrir_mes(self._mes_atual)

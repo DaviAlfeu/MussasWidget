@@ -35,8 +35,12 @@ from utils import (
     normalizar_cor_hex, aplicar_css_fonte_base
 )
 from workers import WorkerMonitorProcessos
-from ui_components import OutlineLabel, BlurredBackgroundFrame, ClickableLabel
+from ui_components import OutlineLabel, BlurredBackgroundFrame, ClickableLabel, WrapLabel
 from dialogs import JanelaConfiguracoes
+
+LARGURA_DETALHE_ATALHO = 122
+LARGURA_NOME_ATALHO = 72
+
 
 class WidgetFrutigerAero(QWidget):
     def _aplicar_icone_botao(self, botao, nome_png, texto_fallback, icon_size=14):
@@ -74,6 +78,8 @@ class WidgetFrutigerAero(QWidget):
         self.timer_inatividade = QTimer(self)
         self.timer_inatividade.setSingleShot(True)
         self.timer_inatividade.timeout.connect(self._voltar_pagina_principal)
+        self.callbacks_interacao = []
+        QApplication.instance().installEventFilter(self)
         
         self.timer_autoclose = QTimer(self)
         self.timer_autoclose.setSingleShot(True)
@@ -111,51 +117,51 @@ class WidgetFrutigerAero(QWidget):
         # Subpágina: Detalhes do Atalho
         self.atalhos_detail_page = QWidget()
         layout_detalhes = QVBoxLayout(self.atalhos_detail_page)
-        layout_detalhes.setContentsMargins(10, 10, 10, 10)
-        layout_detalhes.setSpacing(5)
+        layout_detalhes.setContentsMargins(5, 5, 5, MARGEM_AREA_ICONES)
+        layout_detalhes.setSpacing(4)
         
-        self.btn_voltar_atalho = QPushButton("⬅️")
+        self.btn_voltar_atalho = QPushButton("‹")
         self.btn_voltar_atalho.setFixedSize(24, 24)
+        self.btn_voltar_atalho.setToolTip("Voltar")
         self.btn_voltar_atalho.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_voltar_atalho.clicked.connect(self.fechar_detalhes_atalho)
         
-        self.lbl_nome_atalho = ClickableLabel("Nome do App")
-        self.lbl_nome_atalho.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_nome_atalho = WrapLabel("Nome do App", clicavel=True)
         self.lbl_nome_atalho.setCursor(Qt.CursorShape.PointingHandCursor)
         self.lbl_nome_atalho.setToolTip("Clique para renomear")
         self.lbl_nome_atalho.clicked.connect(self.renomear_atalho_atual)
         
-        self.btn_abrir_atalho = QPushButton("Abrir App")
-        self.btn_abrir_atalho.setFixedSize(90, 24)
+        self.btn_abrir_atalho = QPushButton("Abrir")
+        self.btn_abrir_atalho.setFixedSize(LARGURA_DETALHE_ATALHO - 20, 26)
         self.btn_abrir_atalho.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_abrir_atalho.clicked.connect(self.executar_atalho_atual)
         
         self.lbl_tempo_atalho = OutlineLabel("00:00:00")
         self.lbl_tempo_atalho.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        self.btn_apagar_atalho = QPushButton("🗑️ Apagar")
-        self.btn_apagar_atalho.setFixedSize(90, 24)
+        self.btn_apagar_atalho = QPushButton("🗑")
+        self.btn_apagar_atalho.setFixedSize(24, 24)
+        self.btn_apagar_atalho.setToolTip("Apagar atalho")
         self.btn_apagar_atalho.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_apagar_atalho.clicked.connect(self.apagar_atalho_atual)
 
         top_detalhes = QHBoxLayout()
         top_detalhes.setContentsMargins(0, 0, 0, 0)
-        top_detalhes.addWidget(self.btn_voltar_atalho, alignment=Qt.AlignmentFlag.AlignLeft)
-        top_detalhes.addWidget(self.lbl_nome_atalho, 1, alignment=Qt.AlignmentFlag.AlignCenter)
-        dummy = QWidget()
-        dummy.setFixedSize(24, 24)
-        top_detalhes.addWidget(dummy)
-        
+        top_detalhes.setSpacing(2)
+        top_detalhes.addWidget(self.btn_voltar_atalho, alignment=Qt.AlignmentFlag.AlignTop)
+        top_detalhes.addStretch(1)
+        top_detalhes.addWidget(self.lbl_nome_atalho, alignment=Qt.AlignmentFlag.AlignTop)
+        top_detalhes.addStretch(1)
+        top_detalhes.addWidget(self.btn_apagar_atalho, alignment=Qt.AlignmentFlag.AlignTop)
+
         layout_detalhes.addLayout(top_detalhes)
-        layout_detalhes.addSpacing(5)
+        layout_detalhes.addStretch(1)
         layout_detalhes.addWidget(self.lbl_tempo_atalho)
-        layout_detalhes.addSpacing(5)
-        layout_detalhes.addWidget(self.btn_abrir_atalho, alignment=Qt.AlignmentFlag.AlignCenter)
-        layout_detalhes.addWidget(self.btn_apagar_atalho, alignment=Qt.AlignmentFlag.AlignCenter)
-        layout_detalhes.addStretch()
-        
+        layout_detalhes.addStretch(1)
+        layout_detalhes.addWidget(self.btn_abrir_atalho, alignment=Qt.AlignmentFlag.AlignHCenter)
         self.stacked_atalhos.addWidget(self.atalhos_grid_page)
         self.stacked_atalhos.addWidget(self.atalhos_detail_page)
+        self.stacked_atalhos.currentChanged.connect(lambda _: self._ajustar_geometria_atalhos())
         self.atalho_atual_idx = None
         self._ultimo_check_processos = time.monotonic()
         self._nomes_processo_cache = {}
@@ -401,10 +407,14 @@ class WidgetFrutigerAero(QWidget):
     def abrir_detalhes_atalho(self, idx):
         self.atalho_atual_idx = idx
         caminho = config_app.atalhos[idx]
-        self.lbl_nome_atalho.setText(self.nome_exibicao_atalho(caminho))
+        self._definir_nome_atalho(self.nome_exibicao_atalho(caminho))
         self.atualizar_label_tempo()
         self.stacked_atalhos.setCurrentIndex(1)
         self.aplicar_estilos_aos_botoes_atalho()
+
+    def _definir_nome_atalho(self, nome):
+        self.lbl_nome_atalho.setText(nome)
+        self.lbl_nome_atalho.ajustar_para_largura(LARGURA_NOME_ATALHO, max_linhas=2)
 
     def nome_exibicao_atalho(self, caminho):
         nome_custom = config_app.nomes_atalhos.get(caminho)
@@ -420,7 +430,7 @@ class WidgetFrutigerAero(QWidget):
         if ok and novo_nome.strip():
             config_app.nomes_atalhos[caminho] = novo_nome.strip()
             config_app.salvar()
-            self.lbl_nome_atalho.setText(novo_nome.strip())
+            self._definir_nome_atalho(novo_nome.strip())
 
     def fechar_detalhes_atalho(self):
         self.stacked_atalhos.setCurrentIndex(0)
@@ -537,13 +547,14 @@ class WidgetFrutigerAero(QWidget):
             if int(time.time()) % 15 == 0:
                 config_app.salvar()
 
-    # ---- BOLINHAS INDICADORAS DE PÁGINA ----
+    # ---- INDICADOR DE PÁGINA ----
 
     def _criar_dots_pagina(self):
-        """Cria os indicadores sobre uma pequena área reservada da página."""
-        num_dots = len(self.paginas)
-        DOT_SIZE = 6
-        DOT_SPACING = 8
+        """Cria o indicador no estilo e na posição escolhidos."""
+        num_paginas = len(self.paginas)
+        numeros = config_app.indicador_pagina == "numeros"
+        dot_size = 18 if numeros else 6
+        spacing = 8
 
         if hasattr(self, "container_dots"):
             self.container_dots.hide()
@@ -554,7 +565,7 @@ class WidgetFrutigerAero(QWidget):
                 dot.hide()
                 dot.deleteLater()
         self.dots = []
-        if num_dots <= 1:
+        if num_paginas <= 1:
             self._aplicar_area_segura_paginas()
             return
 
@@ -562,24 +573,27 @@ class WidgetFrutigerAero(QWidget):
         if posicao not in ("baixo", "cima", "esquerda", "direita"):
             posicao = "baixo"
         margem = MARGEM_SEGURANCA_BOLINHAS
-        recuo_ponto = (margem - DOT_SIZE) // 2
-        total = num_dots * DOT_SIZE + (num_dots - 1) * DOT_SPACING
+        quantidade = 1 if numeros else num_paginas
+        total = quantidade * dot_size + (quantidade - 1) * spacing
+        recuo = (margem - dot_size) // 2
         if posicao in ("baixo", "cima"):
             inicio = (150 - total) // 2
             x_base = inicio
-            y_base = 150 - margem + recuo_ponto if posicao == "baixo" else recuo_ponto
+            y_base = (150 - margem + recuo) if posicao == "baixo" else recuo
         else:
             inicio = (150 - total) // 2
-            x_base = recuo_ponto if posicao == "esquerda" else 150 - margem + recuo_ponto
+            x_base = recuo if posicao == "esquerda" else 150 - margem + recuo
             y_base = inicio
 
-        for i in range(num_dots):
-            dot = QFrame(self.pages_container)
-            dot.setFixedSize(DOT_SIZE, DOT_SIZE)
+        for i in range(quantidade):
+            dot = QLabel(self.pages_container)
+            if numeros:
+                dot.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            dot.setFixedSize(dot_size, dot_size)
             if posicao in ("baixo", "cima"):
-                dot.move(x_base + i * (DOT_SIZE + DOT_SPACING), y_base)
+                dot.move(x_base + i * (dot_size + spacing), y_base)
             else:
-                dot.move(x_base, y_base + i * (DOT_SIZE + DOT_SPACING))
+                dot.move(x_base, y_base + i * (dot_size + spacing))
             dot.raise_()
             dot.setVisible(self._bolinhas_visiveis)
             self.dots.append(dot)
@@ -591,6 +605,17 @@ class WidgetFrutigerAero(QWidget):
         margem = MARGEM_AREA_ICONES
         return QRect(margem, margem, 150 - margem * 2, 150 - margem * 2)
 
+    def _ajustar_geometria_atalhos(self):
+        # O detalhe ocupa a página inteira para os botões ficarem rente às bordas
+        area = self._area_segura_pagina()
+        self.scroll_atalhos.setGeometry(0, 0, area.width(), area.height())
+        if self.stacked_atalhos.currentIndex() == 1:
+            self.stacked_atalhos.setGeometry(0, 0, 150, 150)
+            self.page_atalhos.clearMask()
+        else:
+            self.stacked_atalhos.setGeometry(area)
+            self.page_atalhos.setMask(QRegion(area))
+
     def _aplicar_area_segura_paginas(self):
         area = self._area_segura_pagina()
         for pagina in self.paginas:
@@ -598,8 +623,7 @@ class WidgetFrutigerAero(QWidget):
             pagina.setMask(QRegion(area))
 
         if hasattr(self, "stacked_atalhos"):
-            self.stacked_atalhos.setGeometry(area)
-            self.scroll_atalhos.setGeometry(0, 0, area.width(), area.height())
+            self._ajustar_geometria_atalhos()
             self.atualizar_botoes_atalhos()
 
         if hasattr(self, "gerenciador_modulos"):
@@ -608,18 +632,50 @@ class WidgetFrutigerAero(QWidget):
             )
 
     def _atualizar_dots_pagina(self):
-        """Atualiza a cor das bolinhas conforme a página atual e o tema."""
+        """Atualiza os indicadores numéricos da página atual e o tema."""
         if not hasattr(self, 'dots') or not self.dots:
             return
-        cor_ativa  = "#111111" if config_app.modo_claro else "#ffffff"
-        cor_inativa = "rgba(150, 150, 150, 140)"
-        for i, dot in enumerate(self.dots):
-            cor = cor_ativa if i == self.pagina_atual else cor_inativa
-            dot.setStyleSheet(f"QFrame {{ background-color: {cor}; border-radius: 3px; border: none; }}")
+        cor_ativa = "#111111" if config_app.modo_claro else "#ffffff"
+        cor_ativa_txt = "#ffffff" if config_app.modo_claro else "#111111"
+        if config_app.indicador_pagina == "numeros":
+            dot = self.dots[0]
+            dot.setText(str(self.pagina_atual + 1))
+            dot.setStyleSheet(
+                f"QLabel {{ background-color: rgba({17 if config_app.modo_claro else 255}, {17 if config_app.modo_claro else 255}, {17 if config_app.modo_claro else 255}, 204); color: {cor_ativa_txt}; border-radius: 9px; border: none; font-size: 8px; font-weight: bold; qproperty-alignment: AlignCenter; }}"
+            )
+            dot.setVisible(self._bolinhas_visiveis)
             dot.raise_()
+            return
+
+        for indice, dot in enumerate(self.dots):
+            cor = cor_ativa if indice == self.pagina_atual else "rgba(150, 150, 150, 140)"
+            dot.setStyleSheet(
+                f"QLabel {{ background-color: {cor}; border-radius: 3px; border: none; }}"
+            )
+            dot.setVisible(self._bolinhas_visiveis)
+            dot.raise_()
+
+    def eventFilter(self, obj, event):
+        if event.type() in (
+            QEvent.Type.MouseMove, QEvent.Type.MouseButtonPress,
+            QEvent.Type.Wheel, QEvent.Type.KeyPress,
+        ) and isinstance(obj, QWidget):
+            janela = obj.window()
+            if janela is self or janela is getattr(self, "janela_calendario", None):
+                self.registrar_interacao()
+        return super().eventFilter(obj, event)
+
+    def registrar_interacao(self):
+        if self.timer_inatividade.isActive():
+            self.timer_inatividade.start(15000)
+        for callback in self.callbacks_interacao:
+            callback()
 
     def _voltar_pagina_principal(self):
         """Retorna à página principal após inatividade."""
+        if self.underMouse():
+            self.timer_inatividade.start(15000)
+            return
         pagina_principal = self._indice_pagina_principal()
         if self.pagina_atual != pagina_principal:
             self.mudar_pagina("dir")
@@ -670,14 +726,14 @@ class WidgetFrutigerAero(QWidget):
             self.borda_cor = None
             if config_app.modo_claro:
                 self.cor_texto = "#111111"
-                overlay = (245, 245, 245, 180)
+                overlay = (120, 165, 196, 190)
                 border = (255, 255, 255, 200)
             else:
                 self.cor_texto = "#ffffff"
-                overlay = (25, 25, 25, 175)
+                overlay = (48, 66, 78, 190)
                 border = (255, 255, 255, 50)
                 
-        self.container.update_background(wp_path, raio_desfoque(config_app.desfoque), overlay, border, modo_claro=config_app.modo_claro)
+        self.container.update_background(wp_path, raio_desfoque(config_app.desfoque), overlay, border, 12, modo_claro=config_app.modo_claro, cor_base=config_app.cor_base)
         
         bg_btn, bg_hover = self.cores_botoes()
         estilo = f"QPushButton {{ background-color: {bg_btn}; border-radius: 12px; color: {self.cor_texto}; font-weight: bold; border: none; }} QPushButton:hover {{ background-color: {bg_hover}; }}"
@@ -688,6 +744,8 @@ class WidgetFrutigerAero(QWidget):
         
         # Estilos das labels da página de atalhos
         self.lbl_nome_atalho.atualizar_estilo(aplicar_css_fonte_base("lista"), self.cor_texto, self.borda_cor, self.esp_borda)
+        if self.atalho_atual_idx is not None:
+            self.lbl_nome_atalho.ajustar_para_largura(LARGURA_NOME_ATALHO, max_linhas=2)
         self.lbl_tempo_atalho.atualizar_estilo(aplicar_css_fonte_base("nome"), self.cor_texto, self.borda_cor, self.esp_borda)
 
         # Notificar módulos sobre mudança de tema
@@ -707,11 +765,10 @@ class WidgetFrutigerAero(QWidget):
             if isinstance(widget, QPushButton):
                 widget.setStyleSheet(estilo_atalhos)
                 
-        estilo_menor = f"QPushButton {{ background-color: {bg_btn}; border-radius: 8px; color: {self.cor_texto}; font-size: 11px; font-weight: bold; padding: 4px; border: none; }} QPushButton:hover {{ background-color: {bg_hover}; }}"
-        self.btn_voltar_atalho.setStyleSheet(estilo_menor)
-        self.btn_abrir_atalho.setStyleSheet(estilo_menor)
-
-        estilo_apagar = "QPushButton { background-color: rgba(217, 15, 15, 180); border-radius: 8px; color: #ffffff; font-size: 11px; font-weight: bold; padding: 4px; border: none; } QPushButton:hover { background-color: rgba(217, 15, 15, 230); }"
+        estilo_neutro = "QPushButton { background: rgba(120, 120, 120, 80); border: none; border-radius: 6px; color: %s; font-size: 14px; font-weight: bold; padding: 0; } QPushButton:hover { background: rgba(120, 120, 120, 150); }" % self.cor_texto
+        estilo_apagar = "QPushButton { background: rgba(120, 120, 120, 80); border: none; border-radius: 6px; color: %s; font-size: 12px; padding: 0; } QPushButton:hover { background: rgba(180, 35, 35, 150); }" % self.cor_texto
+        self.btn_voltar_atalho.setStyleSheet(estilo_neutro)
+        self.btn_abrir_atalho.setStyleSheet(estilo_neutro.replace("font-size: 14px", "font-size: 11px"))
         self.btn_apagar_atalho.setStyleSheet(estilo_apagar)
 
     def verificar_atualizacoes(self, manual=False):
