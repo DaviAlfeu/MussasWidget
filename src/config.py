@@ -125,8 +125,10 @@ class Configuracoes:
 
     def salvar(self):
         try:
-            with open(CONFIG_FILE, "w") as f:
+            temporario = CONFIG_FILE + ".tmp"
+            with open(temporario, "w") as f:
                 json.dump(self.__dict__, f)
+            os.replace(temporario, CONFIG_FILE)
         except Exception:
             pass
 

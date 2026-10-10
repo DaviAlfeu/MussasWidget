@@ -1,5 +1,6 @@
 import sys
 import signal
+import crashlog
 from updater import tratar_argumentos_de_atualizacao, limpar_updates_antigos
 from PyQt6.QtWidgets import QApplication, QStyleFactory
 from PyQt6.QtCore import QSharedMemory
@@ -11,6 +12,7 @@ if __name__ == '__main__':
         sys.exit(codigo_update)
 
     signal.signal(signal.SIGINT, signal.SIG_DFL)
+    crashlog.instalar()
     
     app = QApplication(sys.argv)
 
