@@ -787,10 +787,21 @@ class Plugin(PluginBase):
             + f" color: {cor}; background: rgba(120, 120, 120, 55); "
             "border-radius: 4px; padding: 2px; text-align: center; }"
         )
+        bg_btn, bg_hover = self.app.cores_botoes()
+        estilo_base = (
+            f"QPushButton {{ background-color: {bg_btn}; border: none; "
+            "border-radius: 6px; padding: 0; "
+            f"color: {cor}; }} "
+            f"QPushButton:hover {{ background-color: {bg_hover}; }} "
+            f"QPushButton:disabled {{ background-color: {bg_btn}; }}"
+        )
+        for botao in (self.btn_anterior, self.btn_play_pause, self.btn_proxima, self.btn_alternar_overlay):
+            botao.setStyleSheet(estilo_base)
         for botao in (self.btn_voltar_10, self.btn_avancar_10, self.btn_aleatorio):
             botao.setStyleSheet(
-                aplicar_css_fonte_base("cal_lista")
-                + f"color: {cor}; font-size: 9px; font-weight: bold;"
+                estilo_base
+                + "QPushButton { " + aplicar_css_fonte_base("cal_lista")
+                + " font-size: 9px; font-weight: bold; }"
             )
         self.progresso.setStyleSheet(
             "QSlider::groove:horizontal { height: 3px; background: rgba(255,255,255,70); }"

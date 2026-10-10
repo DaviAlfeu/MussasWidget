@@ -1,7 +1,7 @@
 import sys
 import signal
 from updater import tratar_argumentos_de_atualizacao, limpar_updates_antigos
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QStyleFactory
 from PyQt6.QtCore import QSharedMemory
 from app_widget import WidgetFrutigerAero
 
@@ -13,6 +13,13 @@ if __name__ == '__main__':
     signal.signal(signal.SIGINT, signal.SIG_DFL)
     
     app = QApplication(sys.argv)
+
+    # No Windows 10 o Qt usa o estilo "windowsvista" (cantos retos); força o visual arredondado do Windows 11
+    if sys.platform == "win32" and sys.getwindowsversion().build < 22000:
+        estilos = {nome.lower(): nome for nome in QStyleFactory.keys()}
+        estilo = estilos.get("windows11") or estilos.get("fusion")
+        if estilo:
+            app.setStyle(estilo)
     
     from PyQt6.QtGui import QIcon
     from utils import external_resource_path, limpar_versoes_antigas
