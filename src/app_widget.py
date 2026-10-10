@@ -661,6 +661,14 @@ class WidgetFrutigerAero(QWidget):
             dot.raise_()
 
     def eventFilter(self, obj, event):
+        if event.type() == QEvent.Type.WindowActivate:
+            if obj is self:
+                QTimer.singleShot(0, lambda: self.aplicar_vidro_desfocado(forcar_blur=True))
+            elif obj is getattr(self, "janela_calendario", None):
+                QTimer.singleShot(
+                    0,
+                    lambda: atualizar_vidro(obj, obj.container, forcar_blur=True),
+                )
         if event.type() in (
             QEvent.Type.MouseMove, QEvent.Type.MouseButtonPress,
             QEvent.Type.Wheel, QEvent.Type.KeyPress,
@@ -704,8 +712,8 @@ class WidgetFrutigerAero(QWidget):
         super().showEvent(event)
         self.aplicar_vidro_desfocado()
 
-    def aplicar_vidro_desfocado(self):
-        atualizar_vidro(self, self.container)
+    def aplicar_vidro_desfocado(self, forcar_blur=False):
+        atualizar_vidro(self, self.container, forcar_blur=forcar_blur)
 
     def moveEvent(self, event):
         super().moveEvent(event)

@@ -48,7 +48,7 @@ class JanelaVidro(QWidget):
         regiao = gdi32.CreateRoundRectRgn(0, 0, int(self.width() * dpr) + 1, int(self.height() * dpr) + 1, r, r)
         ctypes.windll.user32.SetWindowRgn(wintypes.HWND(int(self.winId())), regiao, True)
 
-    def sincronizar(self, alvo, topo, cor):
+    def sincronizar(self, alvo, topo, cor, forcar_blur=False):
         intensidade = int(alpha_desfoque(config_app.desfoque, 0, 40))
         try:
             origem = alvo.mapToGlobal(QPoint(0, 0))
@@ -59,7 +59,7 @@ class JanelaVidro(QWidget):
             self.setGeometry(origem.x(), origem.y(), alvo.width(), alvo.height())
             if not self.isVisible():
                 self.show()
-            if not self._blur_ok or self._cor != (cor, intensidade):
+            if forcar_blur or not self._blur_ok or self._cor != (cor, intensidade):
                 self._cor = (cor, intensidade)
                 self._aplicar_blur(cor, intensidade)
                 self._blur_ok = True
@@ -71,7 +71,7 @@ class JanelaVidro(QWidget):
             pass
 
 
-def atualizar_vidro(host, alvo):
+def atualizar_vidro(host, alvo, forcar_blur=False):
     """Mantém o vidro de `host` sincronizado com o container `alvo` (cria, move, redimensiona ou esconde)."""
     if sys.platform != "win32":
         return
@@ -83,7 +83,7 @@ def atualizar_vidro(host, alvo):
     if vidro is None:
         vidro = host._vidro = JanelaVidro()
     topo = bool(host.windowFlags() & Qt.WindowType.WindowStaysOnTopHint)
-    vidro.sincronizar(alvo, topo, config_app.cor_base)
+    vidro.sincronizar(alvo, topo, config_app.cor_base, forcar_blur=forcar_blur)
 
 
 def esconder_vidro(host):
