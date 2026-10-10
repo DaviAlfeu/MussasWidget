@@ -10,6 +10,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QEvent, QPoint, QRect, QTimer
 from PyQt6.QtGui import QColor, QPainter, QFont, QPixmap, QPainterPath
 
+from vidro import atualizar_vidro, esconder_vidro
 from config import (
     config_app, APP_VERSION, PASTA_WALLPAPERS, 
     NIVEIS_DESFOQUE, NIVEIS_ESPESSURA, indice_desfoque, indice_espessura,
@@ -103,6 +104,9 @@ class JanelaConfiguracoes(QDialog):
             self.combo_tema.addItem(nome, chave)
         self.combo_tema.setCurrentIndex(max(0, self.combo_tema.findData(config_app.tema)))
         
+        self.check_vidro = QCheckBox("Vidro desfocado (desfoca o fundo do desktop)")
+        self.check_vidro.setChecked(config_app.vidro_desfocado)
+
         self.check_windows = QCheckBox("Iniciar junto com o Windows")
         self.check_windows.setChecked(config_app.iniciar_com_windows)
         
@@ -211,6 +215,7 @@ class JanelaConfiguracoes(QDialog):
         
         layout_personalizacao.addWidget(QLabel("Tema:"))
         layout_personalizacao.addWidget(self.combo_tema)
+        layout_personalizacao.addWidget(self.check_vidro)
         layout_personalizacao.addSpacing(6)
         layout_personalizacao.addLayout(layout_wp_top)
         layout_personalizacao.addWidget(self.combo_wp)
@@ -519,6 +524,7 @@ class JanelaConfiguracoes(QDialog):
         config_app.wallpaper = self.combo_wp.currentText()
         config_app.desfoque = NIVEIS_DESFOQUE[self.slider_blur.value()]
         config_app.espessura_borda = NIVEIS_ESPESSURA[self.slider_esp.value()]
+        config_app.vidro_desfocado = self.check_vidro.isChecked()
         config_app.salvar()
         config_app.aplicar_registro_windows()
 
@@ -889,12 +895,41 @@ class JanelaCalendario(QWidget):
                 return True
         return super().eventFilter(obj, event)
 
+    def atualizar_vidro_calendario(self):
+        atualizar_vidro(self, self.container)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.atualizar_vidro_calendario()
+
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        if getattr(self, "_vidro", None) is not None and self._vidro.isVisible():
+            self.atualizar_vidro_calendario()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if getattr(self, "_vidro", None) is not None and self._vidro.isVisible():
+            self.atualizar_vidro_calendario()
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        esconder_vidro(self)
+
     def atualizar_dados(self, dados, cor_texto, overlay_color, border_color, wp_path, blur, borda_cor=None, esp_borda=0, modo_claro=False, cor_base=None):
         self.dados = dados
         self.cor_texto = cor_texto
         self.borda_cor = borda_cor
         self.esp_borda = esp_borda
+        if config_app.vidro_desfocado:
+            wp_path = "Nenhum"
         self.container.update_background(wp_path, blur, overlay_color, border_color, 12, modo_claro=modo_claro, cor_base=cor_base)
+        if config_app.vidro_desfocado:
+            vidro = QColor(self.container.overlay_color)
+            vidro.setAlpha(1)
+            self.container.overlay_color = vidro
+            self.container.update()
+        self.atualizar_vidro_calendario()
         
         meses_com_aniv = set()
         for item in dados:

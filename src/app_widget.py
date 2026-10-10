@@ -5,6 +5,8 @@ import subprocess
 import urllib.request
 import json
 import tempfile
+import ctypes
+from ctypes import wintypes
 
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QLabel, QFrame, QPushButton, 
@@ -38,6 +40,7 @@ from utils import (
 from workers import WorkerMonitorProcessos
 from ui_components import OutlineLabel, BlurredBackgroundFrame, ClickableLabel, WrapLabel
 from dialogs import JanelaConfiguracoes
+from vidro import atualizar_vidro, esconder_vidro
 
 LARGURA_DETALHE_ATALHO = 122
 LARGURA_NOME_ATALHO = 72
@@ -73,6 +76,7 @@ class WidgetFrutigerAero(QWidget):
         self.borda_cor = None
         self.esp_borda = 0
         self.cor_texto = "#ffffff"
+        self._vidro = None
         self.paginas = []  # Lista dinâmica de páginas (QWidgets)
 
         # Timer de inatividade: volta para página principal após 15s
@@ -694,13 +698,32 @@ class WidgetFrutigerAero(QWidget):
         self.setWindowFlags(flags)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.show()
+        self.aplicar_vidro_desfocado()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.aplicar_vidro_desfocado()
+
+    def aplicar_vidro_desfocado(self):
+        atualizar_vidro(self, self.container)
+
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        if getattr(self, "_vidro", None) is not None and self._vidro.isVisible():
+            self.aplicar_vidro_desfocado()
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        esconder_vidro(self)
 
     def cores_botoes(self):
         alpha = alpha_desfoque(config_app.desfoque)
         alpha_hover = min(255, alpha + 40)
+        base = QColor(config_app.cor_base)
+        r, g, b = base.red(), base.green(), base.blue()
         if config_app.modo_claro:
-            return f"rgba(240, 240, 240, {alpha})", f"rgba(255, 255, 255, {alpha_hover})"
-        return f"rgba(20, 20, 20, {alpha})", f"rgba(0, 0, 0, {alpha_hover})"
+            return f"rgba({r}, {g}, {b}, {alpha})", f"rgba({min(255, r + 15)}, {min(255, g + 15)}, {min(255, b + 15)}, {alpha_hover})"
+        return f"rgba({r}, {g}, {b}, {alpha})", f"rgba({max(0, r - 15)}, {max(0, g - 15)}, {max(0, b - 15)}, {alpha_hover})"
 
     def aplicar_tema(self):
         wp_path = "Nenhum"
@@ -709,6 +732,8 @@ class WidgetFrutigerAero(QWidget):
             if os.path.exists(caminho_wp):
                 wp_path = caminho_wp
 
+        if config_app.vidro_desfocado:
+            wp_path = "Nenhum"
         tem_wp = (wp_path != "Nenhum")
         self.esp_borda = float(config_app.espessura_borda) if tem_wp else 0.0
 
@@ -734,7 +759,14 @@ class WidgetFrutigerAero(QWidget):
                 overlay = (48, 66, 78, 190)
                 border = (255, 255, 255, 50)
                 
+        self.aplicar_vidro_desfocado()
         self.container.update_background(wp_path, raio_desfoque(config_app.desfoque), overlay, border, 12, modo_claro=config_app.modo_claro, cor_base=config_app.cor_base)
+        if config_app.vidro_desfocado:
+            # Overlay translúcido para o desfoque do Windows aparecer por trás
+            vidro = QColor(self.container.overlay_color)
+            vidro.setAlpha(1)
+            self.container.overlay_color = vidro
+            self.container.update()
         
         bg_btn, bg_hover = self.cores_botoes()
         estilo = f"QPushButton {{ background-color: {bg_btn}; border-radius: 12px; color: {self.cor_texto}; font-weight: bold; border: none; }} QPushButton:hover {{ background-color: {bg_hover}; }}"
@@ -952,11 +984,13 @@ class WidgetFrutigerAero(QWidget):
             self.top_panel.show()
             self.linha_top.show()
             self.timer_autoclose.start(10000)
+            self.aplicar_vidro_desfocado()
         else:
             self.container.setGeometry(24, 26, 150, 150)
             self.top_panel.hide()
             self.linha_top.hide()
             self.timer_autoclose.stop()
+            self.aplicar_vidro_desfocado()
 
     def alternar_fixacao(self):
         self.fixado = not self.fixado

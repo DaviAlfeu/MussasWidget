@@ -62,6 +62,7 @@ class Configuracoes:
         self.modo_claro = False
         self.wallpaper = "Nenhum"
         self.desfoque = 20
+        self.vidro_desfocado = False
         self.espessura_borda = 1.0
         self.pos_x = None
         self.pos_y = None
@@ -91,6 +92,7 @@ class Configuracoes:
                     self.definir_tema(tema)
                     self.wallpaper = d.get("wallpaper", "Nenhum")
                     self.desfoque = NIVEIS_DESFOQUE[indice_desfoque(d.get("desfoque", 20))]
+                    self.vidro_desfocado = bool(d.get("vidro_desfocado", False))
                     self.espessura_borda = NIVEIS_ESPESSURA[indice_espessura(d.get("espessura_borda", 1.0))]
                     self.pos_x = d.get("pos_x", None)
                     self.pos_y = d.get("pos_y", None)
