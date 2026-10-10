@@ -773,7 +773,7 @@ def _gb(bytes_):
 
 class Plugin(PluginBase):
     nome = "Monitor do PC"
-    versao = "0.0.1"
+    versao = "0.1.0"
 
     def __init__(self, app):
         super().__init__(app)
