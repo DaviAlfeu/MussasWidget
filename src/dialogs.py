@@ -287,18 +287,23 @@ class JanelaConfiguracoes(QDialog):
         self.btn_atualizar_lista_modulos.setEnabled(False)
         self._iniciar_worker_modulos()
 
-    def baixar_modulo(self, modulo):
+    def baixar_modulo(self, modulo, acao="baixar"):
         if self._worker_modulos is not None and self._worker_modulos.isRunning():
             return
         nome = modulo["nome"]
-        self._operacao_modulos = "baixar"
-        self.lbl_status_modulos.setText(f"Baixando {os.path.splitext(nome)[0]}...")
+        self._operacao_modulos = acao
+        verbo = "Atualizando" if acao == "atualizar" else "Baixando"
+        self.lbl_status_modulos.setText(f"{verbo} {os.path.splitext(nome)[0]}...")
         self._definir_botoes_modulos_habilitados(False)
         self.btn_atualizar_lista_modulos.setEnabled(False)
-        self._iniciar_worker_modulos(nome, modulo["url"], "baixar")
+        self._iniciar_worker_modulos(
+            nome, modulo["url"], acao, modulo.get("versao")
+        )
 
-    def _iniciar_worker_modulos(self, nome=None, url=None, acao=None):
-        self._worker_modulos = WorkerModulosGitHub(nome, url, acao, self)
+    def _iniciar_worker_modulos(self, nome=None, url=None, acao=None, versao=None):
+        self._worker_modulos = WorkerModulosGitHub(
+            nome, url, acao, versao=versao, parent=self
+        )
         self._worker_modulos.resultado.connect(self._resultado_modulos)
         self._worker_modulos.erro.connect(self._erro_modulos)
         self._worker_modulos.finished.connect(self._finalizar_worker_modulos)
@@ -307,7 +312,7 @@ class JanelaConfiguracoes(QDialog):
     def _resultado_modulos(self, resultado):
         if self._operacao_modulos == "listar":
             self._exibir_modulos(resultado)
-            self.lbl_status_modulos.setText(f"{len(resultado)} módulo(s) disponível(is)")
+            self._definir_status_lista_modulos(resultado)
             return
 
         nome = resultado["nome"]
@@ -322,6 +327,18 @@ class JanelaConfiguracoes(QDialog):
                 QMessageBox.warning(
                     self, "Módulos", texto_erro
                 )
+        elif acao == "atualizar":
+            if gerenciador.modulo_carregado(nome):
+                gerenciador.desativar_modulo(nome)
+                QTimer.singleShot(
+                    150, lambda arquivo=nome: self._aguardar_recarregamento_modulo(arquivo)
+                )
+            else:
+                self.lbl_status_modulos.setText(
+                    f"Código de {os.path.splitext(nome)[0]} atualizado."
+                )
+                QTimer.singleShot(150, self.atualizar_lista_modulos)
+                return
         else:
             gerenciador.desativar_modulo(nome)
             if acao == "excluir":
@@ -332,7 +349,39 @@ class JanelaConfiguracoes(QDialog):
                 ]
         self._atualizar_paginas_principais()
         self._exibir_modulos(self._modulos_remotos)
-        self.lbl_status_modulos.setText(f"{len(self._modulos_remotos)} módulo(s) disponível(is)")
+        self._definir_status_lista_modulos(self._modulos_remotos)
+
+    def _definir_status_lista_modulos(self, modulos):
+        atualizacoes = sum(
+            bool(modulo.get("atualizacao_disponivel")) for modulo in modulos
+        )
+        status = f"{len(modulos)} módulo(s) disponível(is)"
+        if atualizacoes:
+            status += f" · {atualizacoes} atualização(ões) disponível(is)"
+        self.lbl_status_modulos.setText(status)
+
+    def _aguardar_recarregamento_modulo(self, nome):
+        gerenciador = self.parent_widget.gerenciador_modulos
+        if gerenciador.modulo_carregado(nome):
+            QTimer.singleShot(
+                150, lambda arquivo=nome: self._aguardar_recarregamento_modulo(arquivo)
+            )
+            return
+        if not gerenciador.ativar_modulo(nome):
+            detalhe = gerenciador.ultimo_erro_ativacao or "erro não informado"
+            QMessageBox.warning(
+                self,
+                "Módulo atualizado",
+                f"O código foi atualizado, mas não foi possível recarregar "
+                f"{os.path.splitext(nome)[0]}.\n\n{detalhe}\n\n"
+                "Reinicie o MussasWidget para tentar carregar a atualização.",
+            )
+        else:
+            self._atualizar_paginas_principais()
+            self.lbl_status_modulos.setText(
+                f"{os.path.splitext(nome)[0]} atualizado e recarregado."
+            )
+        QTimer.singleShot(150, self.atualizar_lista_modulos)
 
     def _atualizar_paginas_principais(self):
         selecao = self.combo_pagina_principal.currentData()
@@ -387,9 +436,31 @@ class JanelaConfiguracoes(QDialog):
             if versao and versao_tuple(versao) < (1, 0, 0):
                 nome_exibicao += "-BETA"
             rotulo = QLabel(nome_exibicao)
+            versao_local = modulo.get("versao_local")
+            if versao:
+                rotulo.setToolTip(
+                    f"Versão instalada: {versao_local or 'desconhecida'}\n"
+                    f"Versão disponível: {versao}"
+                )
             layout_linha.addWidget(rotulo, 1)
             estado = estado_modulo(nome)
             acoes = []
+            if modulo.get("atualizacao_disponivel") and modulo.get("url"):
+                botao_atualizar = QPushButton()
+                botao_atualizar.setFixedSize(26, 26)
+                botao_atualizar.setIcon(
+                    self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowUp)
+                )
+                botao_atualizar.setToolTip(
+                    f"Atualizar módulo: {versao_local} → {versao}"
+                )
+                botao_atualizar.clicked.connect(
+                    lambda checked=False, item=modulo:
+                    self.alterar_modulo(item, "atualizar")
+                )
+                layout_linha.addWidget(botao_atualizar)
+                acoes.append(botao_atualizar)
+
             check_ativo = QCheckBox()
             check_ativo.setChecked(estado == "ativo")
             check_ativo.setToolTip("Módulo ativo" if estado == "ativo" else "Ativar módulo")
@@ -474,6 +545,18 @@ class JanelaConfiguracoes(QDialog):
                 f"Deseja excluir o módulo {os.path.splitext(nome)[0]}?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No
+            )
+            if resposta != QMessageBox.StandardButton.Yes:
+                return
+        elif acao == "atualizar":
+            resposta = QMessageBox.question(
+                self,
+                "Atualizar módulo",
+                f"Atualizar {os.path.splitext(nome)[0]} da versão "
+                f"{modulo.get('versao_local') or 'desconhecida'} para "
+                f"{modulo.get('versao')}?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
             )
             if resposta != QMessageBox.StandardButton.Yes:
                 return

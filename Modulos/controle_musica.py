@@ -1,16 +1,21 @@
 import asyncio
+import ctypes
 import json
+import re
 import secrets
 import time
 import threading
+from ctypes import wintypes
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from PyQt6.QtCore import (
-    QEvent, QObject, QPoint, QPropertyAnimation, QRectF, QThread, QTimer, Qt, QSize,
+    QEvent, QObject, QPoint, QPointF, QPropertyAnimation, QRectF, QThread, QTimer, Qt, QSize,
     QEasingCurve, pyqtSignal
 )
-from PyQt6.QtGui import QPainter, QPainterPath, QPixmap
+from PyQt6.QtGui import (
+    QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
+)
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
     QGraphicsOpacityEffect, QHBoxLayout,
@@ -19,6 +24,7 @@ from PyQt6.QtWidgets import (
 )
 
 from config import config_app
+from vidro import atualizar_vidro, esconder_vidro
 from utils import aplicar_css_fonte_base
 from gerenciador_modulos import PluginBase
 from ui_components import BlurredBackgroundFrame, ClickableLabel
@@ -456,7 +462,7 @@ class FiltroJanelaMusica(QObject):
                 plugin._mostrar_overlay()
             elif tipo == QEvent.Type.Hide:
                 plugin._animacao_capa.stop()
-                plugin.painel_capa.hide()
+                plugin._esconder_painel_capa()
         elif observado is plugin.app.container:
             if tipo in (QEvent.Type.Move, QEvent.Type.Resize):
                 plugin._posicionar_widgets()
@@ -469,9 +475,314 @@ class FiltroJanelaMusica(QObject):
         return False
 
 
+class WorkerPlaylistUIA(QThread):
+    """Lê a lista de faixas exibida na janela do player via UI Automation (sem extensão)."""
+
+    resultado = pyqtSignal(object)
+
+    ORCAMENTO_SEGUNDOS = 6.0
+    ESCOPO_DESCENDENTES = 4
+    TIPO_LINK = 50005
+    TIPO_DOCUMENTO = 50030
+    TIPO_ITEM_LISTA = 50007
+    TIPO_ITEM_DADOS = 50029
+    TIPO_TEXTO = 50020
+    EXECUTAVEIS = (
+        ("spotify", "spotify.exe", "Spotify"),
+        ("chrome", "chrome.exe", "Chrome"),
+        ("msedge", "msedge.exe", "Edge"),
+        ("edge", "msedge.exe", "Edge"),
+        ("brave", "brave.exe", "Brave"),
+        ("firefox", "firefox.exe", "Firefox"),
+        ("opera", "opera.exe", "Opera"),
+        ("vivaldi", "vivaldi.exe", "Vivaldi"),
+    )
+    SERVICOS = (
+        "youtube music", "youtube", "spotify", "soundcloud", "deezer",
+        "tidal", "amazon music", "apple music",
+    )
+    _UNIDADE = (
+        r"(?:hours?|hrs?|minutes?|mins?|seconds?|secs?|horas?|minutos?|"
+        r"segundos?|heures?|secondes?|stunden?|minuten|sekunden?|ore|minuti|"
+        r"secondi)"
+    )
+    _FRASE_DURACAO = re.compile(
+        rf"\d+\s+{_UNIDADE}\b(?:\s*(?:,|and|e|y|et|und)?\s*\d+\s+{_UNIDADE}\b)*",
+        re.IGNORECASE,
+    )
+    _RELOGIO = re.compile(r"^\d{1,2}:\d{2}(?::\d{2})?$")
+    _IGNORADOS = {"explicit", "explícito", "explicito", "lyrics", "live"}
+
+    def __init__(self, fonte, titulo_atual, parent=None):
+        super().__init__(parent)
+        self.fonte = fonte or ""
+        self.titulo_atual = (titulo_atual or "").strip().lower()
+
+    def run(self):
+        vazio = {"origem": "", "titulo_lista": "", "faixas": [], "atual": -1}
+        try:
+            self.resultado.emit(self._ler() or vazio)
+        except Exception:
+            self.resultado.emit(vazio)
+
+    @staticmethod
+    def _exe_do_processo(pid):
+        kernel32 = ctypes.windll.kernel32
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.QueryFullProcessImageNameW.argtypes = [
+            wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        processo = kernel32.OpenProcess(0x1000, False, pid)
+        if not processo:
+            return ""
+        try:
+            buffer = ctypes.create_unicode_buffer(1024)
+            tamanho = wintypes.DWORD(len(buffer))
+            if kernel32.QueryFullProcessImageNameW(
+                processo, 0, buffer, ctypes.byref(tamanho)
+            ):
+                return buffer.value.rsplit("\\", 1)[-1].lower()
+        finally:
+            kernel32.CloseHandle(processo)
+        return ""
+
+    def _executavel_alvo(self):
+        identificador = self.fonte.lower()
+        for termo, exe, rotulo in self.EXECUTAVEIS:
+            if termo in identificador:
+                return exe, rotulo
+        base = identificador.rsplit("!", 1)[-1]
+        if not base.endswith(".exe"):
+            base += ".exe"
+        return base, self.fonte.rsplit("!", 1)[-1] or "Player"
+
+    def _ler(self):
+        import uiautomation as auto
+
+        exe, rotulo = self._executavel_alvo()
+        with auto.UIAutomationInitializerInThread():
+            janelas = [
+                janela for janela in auto.GetRootControl().GetChildren()
+                if self._exe_do_processo(janela.ProcessId) == exe
+            ]
+
+            def prioridade(janela):
+                titulo = (janela.Name or "").lower()
+                if len(self.titulo_atual) >= 3 and self.titulo_atual in titulo:
+                    return 0
+                return 1 if any(s in titulo for s in self.SERVICOS) else 2
+
+            janelas.sort(key=prioridade)
+            prazo = time.monotonic() + self.ORCAMENTO_SEGUNDOS
+            for janela in janelas[:6]:
+                for tentativa in range(2):
+                    elementos, pronto = self._coletar(auto, janela)
+                    faixas = self._extrair_faixas(elementos)
+                    if faixas:
+                        atual = next(
+                            (
+                                indice for indice, nome in enumerate(faixas)
+                                if len(self.titulo_atual) >= 3
+                                and self.titulo_atual in nome.lower()
+                            ),
+                            -1,
+                        )
+                        return {
+                            "origem": rotulo,
+                            "titulo_lista": "Lista atual",
+                            "faixas": faixas,
+                            "atual": atual,
+                        }
+                    # O navegador só expõe a página depois da primeira consulta.
+                    if pronto or time.monotonic() >= prazo:
+                        break
+                    time.sleep(1.2)
+                if time.monotonic() >= prazo:
+                    break
+        return None
+
+    def _coletar(self, auto, janela):
+        """Retorna (elementos, pronto); elementos = (tipo, nome, esq, topo, larg, alt)."""
+        from uiautomation.uiautomation import _AutomationClient
+
+        ua = _AutomationClient.instance().IUIAutomation
+        propriedade = auto.PropertyId.ControlTypeProperty
+        cache = ua.CreateCacheRequest()
+        for prop in (
+            auto.PropertyId.NameProperty,
+            auto.PropertyId.BoundingRectangleProperty,
+            auto.PropertyId.ControlTypeProperty,
+        ):
+            cache.AddProperty(prop)
+
+        documentos = janela.Element.FindAll(
+            self.ESCOPO_DESCENDENTES,
+            ua.CreatePropertyCondition(propriedade, self.TIPO_DOCUMENTO),
+        )
+        alvos = [documentos.GetElement(i) for i in range(documentos.Length)]
+        com_nome = [alvo for alvo in alvos if alvo.CurrentName]
+        alvos = com_nome or alvos
+
+        condicao = None
+        for tipo in (
+            self.TIPO_LINK, self.TIPO_ITEM_LISTA, self.TIPO_ITEM_DADOS,
+            self.TIPO_TEXTO,
+        ):
+            parcial = ua.CreatePropertyCondition(propriedade, tipo)
+            condicao = (
+                parcial if condicao is None
+                else ua.CreateOrCondition(condicao, parcial)
+            )
+
+        elementos = []
+        for alvo in alvos:
+            lista = alvo.FindAllBuildCache(
+                self.ESCOPO_DESCENDENTES, condicao, cache
+            )
+            for indice in range(lista.Length):
+                elemento = lista.GetElement(indice)
+                retangulo = elemento.CachedBoundingRectangle
+                elementos.append((
+                    elemento.CachedControlType,
+                    elemento.CachedName or "",
+                    retangulo.left, retangulo.top,
+                    retangulo.right - retangulo.left,
+                    retangulo.bottom - retangulo.top,
+                ))
+        return elementos, len(elementos) >= 40
+
+    @classmethod
+    def _extrair_faixas(cls, elementos):
+        candidatos = (
+            cls._faixas_por_links(elementos),
+            cls._faixas_por_duracao(elementos),
+            cls._faixas_por_itens(elementos),
+        )
+        melhor = max(candidatos, key=len)
+        return melhor if len(melhor) >= 2 else []
+
+    @staticmethod
+    def _maior_grupo(itens, chave):
+        grupos = {}
+        for item in itens:
+            grupos.setdefault(chave(item), []).append(item)
+        if not grupos:
+            return []
+        return max(grupos.values(), key=len)
+
+    @staticmethod
+    def _remover_indices(textos):
+        """Remove o número de posição inicial quando ele acompanha a posição na lista."""
+        encontrados = []
+        for posicao, texto in enumerate(textos):
+            m = re.match(r"^(\d{1,3})[\s.\-–]+(\S.*)$", texto)
+            if m:
+                encontrados.append((posicao, int(m.group(1)), m.group(2)))
+        if len(encontrados) < max(2, int(len(textos) * 0.6)):
+            return textos
+        deslocamentos = {numero - posicao for posicao, numero, _ in encontrados}
+        if len(deslocamentos) != 1:
+            return textos
+        resultado = list(textos)
+        for posicao, _numero, resto in encontrados:
+            resultado[posicao] = resto
+        return resultado
+
+    @staticmethod
+    def _sem_repeticao(textos):
+        resultado = []
+        for texto in textos:
+            if texto and texto not in resultado:
+                resultado.append(texto)
+        return resultado[:100]
+
+    @classmethod
+    def _faixas_por_links(cls, elementos):
+        links = []
+        for tipo, nome, esq, topo, larg, _alt in elementos:
+            if tipo != cls.TIPO_LINK or larg <= 0:
+                continue
+            m = cls._FRASE_DURACAO.search(nome)
+            if m and nome[:m.start()].strip():
+                links.append((topo, esq, larg, nome, m))
+        grupo = cls._maior_grupo(links, lambda i: (i[1], i[2] // 16))
+        grupo.sort(key=lambda i: i[0])
+        titulos = cls._remover_indices(
+            [i[3][:i[4].start()].strip() for i in grupo]
+        )
+        resultado = []
+        for item, titulo in zip(grupo, titulos):
+            artista = re.sub(r"\s+", " ", item[3][item[4].end():]).strip()
+            resultado.append(f"{titulo} — {artista}" if artista else titulo)
+        return cls._sem_repeticao(resultado)
+
+    @classmethod
+    def _faixas_por_duracao(cls, elementos):
+        textos = [e for e in elementos if e[0] == cls.TIPO_TEXTO and e[4] > 0]
+        duracoes = [e for e in textos if cls._RELOGIO.match(e[1].strip())]
+        duracoes = cls._maior_grupo(duracoes, lambda e: e[2] // 8)
+        if len(duracoes) < 2:
+            return []
+        duracoes.sort(key=lambda e: e[3])
+        centros = [d[3] + d[5] / 2 for d in duracoes]
+        outros = [
+            e for e in textos
+            if not cls._RELOGIO.match(e[1].strip())
+            and len(e[1].strip()) >= 2
+            and not e[1].strip().isdigit()
+            and e[1].strip().lower() not in cls._IGNORADOS
+        ]
+        resultado = []
+        for indice, duracao in enumerate(duracoes):
+            anterior = centros[indice - 1] if indice else None
+            proximo = centros[indice + 1] if indice + 1 < len(centros) else None
+            meio_ant = (
+                (anterior + centros[indice]) / 2 if anterior is not None
+                else centros[indice] - (proximo - centros[indice]) / 2
+            )
+            meio_prox = (
+                (proximo + centros[indice]) / 2 if proximo is not None
+                else centros[indice] + (centros[indice] - anterior) / 2
+            )
+            linha = sorted(
+                (
+                    e for e in outros
+                    if meio_ant <= e[3] + e[5] / 2 < meio_prox
+                    and e[2] < duracao[2]
+                ),
+                key=lambda e: (e[3], e[2]),
+            )
+            nomes = cls._sem_repeticao([e[1].strip() for e in linha])
+            if nomes:
+                resultado.append(
+                    f"{nomes[0]} — {nomes[1]}" if len(nomes) > 1 else nomes[0]
+                )
+        return cls._sem_repeticao(resultado)
+
+    @classmethod
+    def _faixas_por_itens(cls, elementos):
+        itens = [
+            e for e in elementos
+            if e[0] in (cls.TIPO_ITEM_LISTA, cls.TIPO_ITEM_DADOS)
+            and e[4] > 0 and e[1].strip()
+        ]
+        grupo = cls._maior_grupo(itens, lambda e: (e[0], e[2], e[4] // 16))
+        grupo.sort(key=lambda e: e[3])
+        nomes = []
+        for item in grupo:
+            nome = item[1].replace("\r", " ").replace("\n", " ")
+            nome = cls._FRASE_DURACAO.sub(" ", nome)
+            nome = re.sub(r"\b\d{1,2}:\d{2}(?::\d{2})?\b", " ", nome)
+            nomes.append(re.sub(r"\s+", " ", nome).strip(" -–·•|")[:200])
+        return cls._sem_repeticao(cls._remover_indices(nomes))
+
+
 class Plugin(PluginBase):
     nome = "Música"
-    versao = "0.1.1"
+    versao = "0.1.2"
 
     def __init__(self, app):
         super().__init__(app)
@@ -568,13 +879,15 @@ class Plugin(PluginBase):
         self.lista_playlist.setStyleSheet(
             "QListWidget { background: transparent; border: none; }"
         )
-        self.estado_playlist = QLabel(
-            "O Windows não fornece a fila desta sessão."
-        )
+        self.estado_playlist = QLabel("")
         self.estado_playlist.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.estado_playlist.setWordWrap(True)
+        self.estado_playlist.setFixedHeight(28)
         layout_playlist.addWidget(self.lista_playlist, 1)
+        layout_playlist.addStretch(1)
         layout_playlist.addWidget(self.estado_playlist)
+        layout_playlist.addStretch(1)
+        self.lista_playlist.hide()
 
         self.pilha_capa.addWidget(self.pagina_capa)
         self.pilha_capa.addWidget(self.pagina_playlist)
@@ -587,6 +900,7 @@ class Plugin(PluginBase):
         self._animacao_capa.setDuration(180)
         self._animacao_capa.setEasingCurve(QEasingCurve.Type.InOutQuad)
         self._animacao_capa.finished.connect(self._fim_animacao_capa)
+        self._animacao_capa.valueChanged.connect(self._opacidade_vidro_capa)
         self.timer_playlist = QTimer(self.app)
         self.timer_playlist.setSingleShot(True)
         self.timer_playlist.setInterval(10_000)
@@ -667,6 +981,7 @@ class Plugin(PluginBase):
             "Mostrar ou ocultar capa e playlist", "alternar_overlay", tamanho=28
         )
         self.btn_alternar_overlay.setEnabled(True)
+        self._atualizar_icone_overlay()
         controles_secundarios.addStretch()
         controles_secundarios.addWidget(self.btn_voltar_10)
         controles_secundarios.addWidget(self.btn_alternar_overlay)
@@ -704,6 +1019,9 @@ class Plugin(PluginBase):
         self.timer_estado.start()
         self._ponte_playlist = None
         self._erro_ponte_playlist = ""
+        self._worker_playlist = None
+        self._playlist_uia = None
+        self._playlist_uia_lida_em = 0.0
         try:
             self._ponte_playlist = PontePlaylistLocal()
         except OSError as erro:
@@ -760,6 +1078,8 @@ class Plugin(PluginBase):
         self.painel_capa.border_radius = self.app.container.border_radius
         self.painel_capa.bg_pixmap = self.app.container.bg_pixmap
         self.painel_capa.update()
+        if self.painel_capa.isVisible():
+            self._atualizar_vidro_capa()
         self.capa.setStyleSheet(
             aplicar_css_fonte_base("lista")
             + f"color: {cor}; background: rgba(255, 255, 255, 35); "
@@ -773,7 +1093,7 @@ class Plugin(PluginBase):
                 aplicar_css_fonte_base("cal_meses") + f" color: {cor};"
             )
         self.estado_playlist.setStyleSheet(
-            aplicar_css_fonte_base("lista") + f" color: {cor};"
+            aplicar_css_fonte_base("cal_lista") + f" color: {cor}; font-size: 9px;"
         )
         self.lista_playlist.setStyleSheet(
             "QListWidget { background: transparent; border: none; "
@@ -790,7 +1110,7 @@ class Plugin(PluginBase):
         bg_btn, bg_hover = self.app.cores_botoes()
         estilo_base = (
             f"QPushButton {{ background-color: {bg_btn}; border: none; "
-            "border-radius: 6px; padding: 0; "
+            "border-radius: 6px; padding: 0; margin: 1px; "
             f"color: {cor}; }} "
             f"QPushButton:hover {{ background-color: {bg_hover}; }} "
             f"QPushButton:disabled {{ background-color: {bg_btn}; }}"
@@ -803,6 +1123,7 @@ class Plugin(PluginBase):
                 + "QPushButton { " + aplicar_css_fonte_base("cal_lista")
                 + " font-size: 9px; font-weight: bold; }"
             )
+        self._atualizar_icone_overlay()
         self.progresso.setStyleSheet(
             "QSlider::groove:horizontal { height: 3px; background: rgba(255,255,255,70); }"
             "QSlider::sub-page:horizontal { background: #55d98b; }"
@@ -822,7 +1143,7 @@ class Plugin(PluginBase):
         self.app.container.removeEventFilter(self._filtro_janela)
         self.lista_playlist.viewport().removeEventFilter(self._filtro_janela)
         self._filtro_janela.deleteLater()
-        self.painel_capa.hide()
+        self._esconder_painel_capa()
         self.painel_capa.deleteLater()
         self._animacao_capa.stop()
         if self._ponte_playlist is not None:
@@ -830,7 +1151,7 @@ class Plugin(PluginBase):
             self._ponte_playlist = None
         return not any(
             worker is not None and worker.isRunning()
-            for worker in (self._worker, self._worker_estado)
+            for worker in (self._worker, self._worker_estado, self._worker_playlist)
         )
 
     def _criar_botao(self, icone, dica, comando, texto="", tamanho=24):
@@ -857,19 +1178,59 @@ class Plugin(PluginBase):
         area = self.app.container.geometry()
         posicao = self.app.mapToGlobal(area.topLeft())
         self.painel_capa.move(
-            posicao.x(), posicao.y() - self.painel_capa.height() - 5
+            posicao.x(), posicao.y() - self.painel_capa.height() - 10
+        )
+        if self.painel_capa.isVisible():
+            self._atualizar_vidro_capa()
+
+    def _atualizar_vidro_capa(self):
+        atualizar_vidro(self.painel_capa, self.painel_capa)
+        vidro = getattr(self.painel_capa, "_vidro", None)
+        if vidro is not None:
+            vidro.setWindowOpacity(self.painel_capa.windowOpacity())
+
+    def _opacidade_vidro_capa(self, _valor=None):
+        # O QVariant do valueChanged pode chegar como None; usa a opacidade real da janela.
+        vidro = getattr(self.painel_capa, "_vidro", None)
+        if vidro is not None:
+            vidro.setWindowOpacity(self.painel_capa.windowOpacity())
+
+    def _esconder_painel_capa(self):
+        self.painel_capa.hide()
+        esconder_vidro(self.painel_capa)
+
+    def _atualizar_icone_overlay(self):
+        aberto = not self._overlay_oculto
+        lado = 18
+        pixmap = QPixmap(lado, lado)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        pintor = QPainter(pixmap)
+        pintor.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pintor.setPen(QPen(QColor(self.app.cor_texto), 2.2,
+                           Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
+                           Qt.PenJoinStyle.RoundJoin))
+        ponta, base = (11, 6) if aberto else (6, 11)
+        pintor.drawPolyline(QPolygonF([
+            QPointF(4, base), QPointF(9, ponta), QPointF(14, base)
+        ]))
+        pintor.end()
+        self.btn_alternar_overlay.setIcon(QIcon(pixmap))
+        self.btn_alternar_overlay.setToolTip(
+            "Fechar capa e playlist" if aberto else "Mostrar capa e playlist"
         )
 
     def _mostrar_overlay(self):
         if self._encerrando:
             return
+        self._atualizar_icone_overlay()
         self._posicionar_widgets()
         self.pilha_capa.setCurrentWidget(self.pagina_capa)
         self.painel_capa.show()
         self.painel_capa.setWindowOpacity(0)
+        self._atualizar_vidro_capa()
         self._animacao_capa.stop()
-        self._animacao_capa.setStartValue(0)
-        self._animacao_capa.setEndValue(1)
+        self._animacao_capa.setStartValue(0.0)
+        self._animacao_capa.setEndValue(1.0)
         self._retorno_capa_apos_fade = False
         self._animacao_capa.start()
         self.timer_ocultar_overlay.start()
@@ -891,13 +1252,14 @@ class Plugin(PluginBase):
         self.pilha_capa.setCurrentWidget(self.pagina_capa)
         self._animacao_capa.stop()
         self._animacao_capa.setStartValue(self.painel_capa.windowOpacity())
-        self._animacao_capa.setEndValue(0)
+        self._animacao_capa.setEndValue(0.0)
         self._retorno_capa_apos_fade = True
         self._animacao_capa.start()
+        self._atualizar_icone_overlay()
 
     def _fim_animacao_capa(self):
         if self._retorno_capa_apos_fade:
-            self.painel_capa.hide()
+            self._esconder_painel_capa()
             self._retorno_capa_apos_fade = False
 
     def _mostrar_playlist(self):
@@ -916,56 +1278,98 @@ class Plugin(PluginBase):
     def _atualizar_lista_playlist(self):
         if self.pilha_capa.currentWidget() is not self.pagina_playlist:
             return
-        if self._ponte_playlist is None:
-            self.lista_playlist.clear()
-            self.estado_playlist.setText(
-                "Ponte local indisponível. Feche outra instância do widget "
-                "ou libere a porta de integração."
-            )
-            self.estado_playlist.setToolTip(self._erro_ponte_playlist)
-            self.estado_playlist.show()
-            return
 
-        snapshot = self._ponte_playlist.snapshot()
-        if (
-            snapshot is None
-            or time.monotonic() - snapshot["received_at"] > 8
-        ):
-            self.lista_playlist.clear()
-            self.estado_playlist.setText(
-                "Instale/ative a extensão do Chrome e abra a fila ou playlist "
-                "no player."
-            )
-            self.estado_playlist.show()
-            return
-
-        faixas = snapshot["tracks"]
-        provedor = {
-            "spotify": "Spotify",
-            "youtube": "YouTube",
-            "youtube_music": "YouTube Music",
-            "soundcloud": "SoundCloud",
-        }[snapshot["provider"]]
-        titulo_lista = snapshot["list_title"] or "Lista atual"
-        self.estado_playlist.setText(
-            f"{provedor} · {titulo_lista} · {len(faixas)} faixas visíveis"
-            if faixas else
-            f"{provedor}: abra a fila/playlist para exibir as faixas."
+        snapshot = (
+            self._ponte_playlist.snapshot()
+            if self._ponte_playlist is not None else None
         )
+        if (
+            snapshot is not None
+            and time.monotonic() - snapshot["received_at"] <= 8
+        ):
+            provedor = {
+                "spotify": "Spotify",
+                "youtube": "YouTube",
+                "youtube_music": "YouTube Music",
+                "soundcloud": "SoundCloud",
+            }[snapshot["provider"]]
+            self._exibir_faixas(
+                provedor, snapshot["list_title"] or "Lista atual",
+                [
+                    f'{faixa["title"]} — {faixa["artist"]}'
+                    if faixa["artist"] else faixa["title"]
+                    for faixa in snapshot["tracks"]
+                ],
+            )
+            return
+
+        self._iniciar_leitura_playlist()
+        resultado = self._playlist_uia
+        if resultado is not None and resultado["faixas"]:
+            self._exibir_faixas(
+                resultado["origem"], resultado["titulo_lista"],
+                resultado["faixas"], resultado["atual"],
+            )
+            return
+        self.lista_playlist.clear()
+        self.lista_playlist.hide()
         self.estado_playlist.setToolTip("")
-        self.estado_playlist.setVisible(not faixas)
-        atual = [
-            f'{faixa["title"]} — {faixa["artist"]}'
-            if faixa["artist"] else faixa["title"]
-            for faixa in faixas
-        ]
+        self.estado_playlist.setText(
+            "Procurando a lista..."
+            if self._worker_playlist is not None or resultado is None else
+            "Abra a fila ou playlist no player."
+        )
+        self.estado_playlist.show()
+
+    def _exibir_faixas(self, origem, titulo_lista, nomes, atual=-1):
+        self.estado_playlist.setToolTip("")
+        self.estado_playlist.setText(
+            f"{origem} · {titulo_lista} · {len(nomes)} faixas"
+            if nomes else
+            f"{origem}: abra a fila/playlist."
+        )
+        self.estado_playlist.setVisible(not nomes)
+        self.lista_playlist.setVisible(bool(nomes))
         existentes = [
             self.lista_playlist.item(indice).text()
             for indice in range(self.lista_playlist.count())
         ]
-        if atual != existentes:
+        if nomes != existentes:
             self.lista_playlist.clear()
-            self.lista_playlist.addItems(atual)
+            self.lista_playlist.addItems(nomes)
+        if 0 <= atual < self.lista_playlist.count():
+            self.lista_playlist.setCurrentRow(atual)
+
+    def _iniciar_leitura_playlist(self):
+        if self._encerrando or self._worker_playlist is not None:
+            return
+        if time.monotonic() - self._playlist_uia_lida_em < 4:
+            return
+        chave = self.combo_sessoes.currentData()
+        sessao = next(
+            (item for item in self._sessoes if item["chave"] == chave), None
+        )
+        if sessao is None:
+            return
+        self._playlist_uia_lida_em = time.monotonic()
+        worker = WorkerPlaylistUIA(
+            sessao["fonte"], sessao["titulo"], parent=self.app
+        )
+        self._worker_playlist = worker
+        worker.resultado.connect(self._playlist_lida)
+        worker.finished.connect(self._worker_playlist_finalizado)
+        worker.finished.connect(worker.deleteLater)
+        worker.start()
+
+    def _worker_playlist_finalizado(self):
+        self._worker_playlist = None
+
+    def _playlist_lida(self, resultado):
+        if self._encerrando:
+            return
+        self._playlist_uia = resultado
+        self._playlist_uia_lida_em = time.monotonic()
+        self._atualizar_lista_playlist()
 
     def _voltar_capa(self):
         self.pilha_capa.setCurrentWidget(self.pagina_capa)

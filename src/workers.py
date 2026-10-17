@@ -17,6 +17,7 @@ from config import URL_CSV_ANIVERSARIOS, URL_CSV_JOGO
 from gerenciador_modulos import (
     alterar_estado_modulo,
     baixar_modulo_github,
+    atualizar_modulo_github,
     excluir_modulo,
     listar_modulos_github,
 )
@@ -26,11 +27,12 @@ class WorkerModulosGitHub(QThread):
     resultado = pyqtSignal(object)
     erro = pyqtSignal(str)
 
-    def __init__(self, nome=None, url=None, acao=None, parent=None):
+    def __init__(self, nome=None, url=None, acao=None, versao=None, parent=None):
         super().__init__(parent)
         self.nome = nome
         self.url = url
         self.acao = acao
+        self.versao = versao
 
     def run(self):
         try:
@@ -38,6 +40,10 @@ class WorkerModulosGitHub(QThread):
                 resultado = listar_modulos_github()
             elif self.acao == "baixar":
                 resultado = baixar_modulo_github(self.nome, self.url)
+            elif self.acao == "atualizar":
+                resultado = atualizar_modulo_github(
+                    self.nome, self.url, self.versao
+                )
             elif self.acao == "ativar":
                 resultado = alterar_estado_modulo(self.nome, True)
             elif self.acao == "desativar":

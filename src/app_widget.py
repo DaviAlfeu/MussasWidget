@@ -19,11 +19,11 @@ from updater import baixar_atualizacao, iniciar_aplicacao_da_atualizacao, regist
 from PyQt6.QtCore import (
     Qt, QTimer, QUrl, QPoint, QRect, pyqtSignal,
     QPropertyAnimation, QParallelAnimationGroup, QEasingCurve, QAbstractAnimation, QEvent, QSharedMemory,
-    QSize, QFileInfo
+    QSize, QFileInfo, QMimeData
 )
 from PyQt6.QtGui import (
     QCursor, QPixmap, QIcon, QAction, 
-    QPainter, QPainterPath, QColor, QImage, QPen, QRegion
+    QPainter, QPainterPath, QColor, QImage, QPen, QRegion, QDrag
 )
 
 from config import (
@@ -44,6 +44,85 @@ from vidro import atualizar_vidro, esconder_vidro
 
 LARGURA_DETALHE_ATALHO = 122
 LARGURA_NOME_ATALHO = 72
+
+
+class BotaoAtalhoArrastavel(QPushButton):
+    FORMATO_ARRASTO = "application/x-mussas-atalho"
+
+    def __init__(self, indice, ao_reordenar, parent=None, arrastavel=True):
+        super().__init__(parent)
+        self.indice_atalho = indice
+        self._ao_reordenar = ao_reordenar
+        self._arrastavel = arrastavel
+        self._posicao_press = None
+        self._arrasto_iniciado = False
+        self.setAcceptDrops(True)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._posicao_press = event.position().toPoint()
+        else:
+            self._posicao_press = None
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if (
+            not self._arrastavel
+            or self._posicao_press is None
+            or not event.buttons() & Qt.MouseButton.LeftButton
+            or (event.position().toPoint() - self._posicao_press).manhattanLength()
+            < QApplication.startDragDistance()
+        ):
+            super().mouseMoveEvent(event)
+            return
+
+        mime = QMimeData()
+        mime.setData(self.FORMATO_ARRASTO, str(self.indice_atalho).encode("ascii"))
+        arrasto = QDrag(self)
+        arrasto.setMimeData(mime)
+        arrasto.setPixmap(self.grab())
+        arrasto.setHotSpot(self._posicao_press)
+        self._arrasto_iniciado = True
+        self._posicao_press = None
+        arrasto.exec(Qt.DropAction.MoveAction)
+        self.setDown(False)
+        self._arrasto_iniciado = False
+
+    def mouseReleaseEvent(self, event):
+        if self._arrasto_iniciado:
+            self._arrasto_iniciado = False
+            self._posicao_press = None
+            event.accept()
+            return
+        self._posicao_press = None
+        super().mouseReleaseEvent(event)
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasFormat(self.FORMATO_ARRASTO):
+            event.setDropAction(Qt.DropAction.MoveAction)
+            event.accept()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event):
+        if event.mimeData().hasFormat(self.FORMATO_ARRASTO):
+            event.setDropAction(Qt.DropAction.MoveAction)
+            event.accept()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):
+        if not event.mimeData().hasFormat(self.FORMATO_ARRASTO):
+            event.ignore()
+            return
+        try:
+            origem = int(bytes(event.mimeData().data(self.FORMATO_ARRASTO)).decode("ascii"))
+        except (UnicodeDecodeError, ValueError):
+            event.ignore()
+            return
+        self._ao_reordenar(origem, self.indice_atalho)
+        event.setDropAction(Qt.DropAction.MoveAction)
+        event.accept()
 
 
 class WidgetFrutigerAero(QWidget):
@@ -110,7 +189,8 @@ class WidgetFrutigerAero(QWidget):
         self.scroll_atalhos.setGeometry(0, 0, 150, 150)
         self.scroll_atalhos.setWidgetResizable(True)
         self.scroll_atalhos.setStyleSheet("background: transparent; border: none;")
-        self.scroll_atalhos.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.scroll_atalhos.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.scroll_atalhos.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         
         self.scroll_content_atalhos = QWidget()
         self.scroll_content_atalhos.setStyleSheet("background: transparent;")
@@ -326,28 +406,42 @@ class WidgetFrutigerAero(QWidget):
     
     def atualizar_botoes_atalhos(self):
         for i in reversed(range(self.layout_atalhos.count())):
-            widget = self.layout_atalhos.itemAt(i).widget()
+            item = self.layout_atalhos.takeAt(i)
+            widget = item.widget()
             if widget:
-                widget.setParent(None)
+                widget.deleteLater()
 
         self.layout_atalhos.setContentsMargins(6, 6, 6, 6)
         self.layout_atalhos.setSpacing(4)
                 
         provider = QFileIconProvider()
-        linha, coluna = 0, 0
         max_colunas = 3
         area = self._area_segura_pagina()
         total_itens = len(config_app.atalhos) + 1
-        total_linhas = max(1, (total_itens + max_colunas - 1) // max_colunas)
+        total_linhas = max(3, (total_itens + max_colunas - 1) // max_colunas)
         largura_botao = (area.width() - 12 - 4 * (max_colunas - 1)) // max_colunas
-        altura_botao = (area.height() - 12 - 4 * (total_linhas - 1)) // total_linhas
+        altura_botao = (area.height() - 12 - 4 * (3 - 1)) // 3
         tamanho_botao = max(12, min(36, largura_botao, altura_botao))
         tamanho_icone = max(10, min(24, tamanho_botao - 8))
+        self.scroll_content_atalhos.setMinimumSize(
+            area.width(),
+            12 + total_linhas * tamanho_botao + 4 * (total_linhas - 1),
+        )
+        for indice in range(self.layout_atalhos.rowCount()):
+            self.layout_atalhos.setRowMinimumHeight(indice, 0)
+            self.layout_atalhos.setRowStretch(indice, 0)
+        for indice in range(max_colunas):
+            self.layout_atalhos.setColumnMinimumWidth(indice, tamanho_botao)
+            self.layout_atalhos.setColumnStretch(indice, 1)
+        for indice in range(total_linhas):
+            self.layout_atalhos.setRowMinimumHeight(indice, tamanho_botao)
+            self.layout_atalhos.setRowStretch(indice, 1)
         
         for idx, caminho in enumerate(config_app.atalhos):
-            btn = QPushButton()
+            btn = BotaoAtalhoArrastavel(idx, self.reordenar_atalho)
             btn.setFixedSize(tamanho_botao, tamanho_botao)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setToolTip("Arraste para reorganizar")
             
             if caminho and os.path.exists(caminho):
                 icon = provider.icon(QFileInfo(caminho))
@@ -360,19 +454,40 @@ class WidgetFrutigerAero(QWidget):
             btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
             btn.customContextMenuRequested.connect(lambda pos, i=idx: self.menu_atalho(pos, i))
             
-            self.layout_atalhos.addWidget(btn, linha, coluna)
-            coluna += 1
-            if coluna >= max_colunas:
-                coluna = 0
-                linha += 1
+            self.layout_atalhos.addWidget(btn, idx // max_colunas, idx % max_colunas)
 
-        btn_add = QPushButton("+")
+        btn_add = BotaoAtalhoArrastavel(
+            len(config_app.atalhos), self.reordenar_atalho, arrastavel=False
+        )
+        btn_add.setText("+")
         btn_add.setFixedSize(tamanho_botao, tamanho_botao)
         btn_add.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_add.setToolTip("Adicionar atalho ou solte aqui para movê-lo ao fim")
         btn_add.clicked.connect(self.adicionar_novo_atalho)
-        self.layout_atalhos.addWidget(btn_add, linha, coluna)
+        self.layout_atalhos.addWidget(
+            btn_add, len(config_app.atalhos) // max_colunas,
+            len(config_app.atalhos) % max_colunas,
+        )
 
         self.aplicar_estilos_aos_botoes_atalho()
+
+    def reordenar_atalho(self, origem, destino):
+        quantidade = len(config_app.atalhos)
+        if (
+            not isinstance(origem, int)
+            or not isinstance(destino, int)
+            or origem < 0
+            or origem >= quantidade
+            or destino < 0
+            or destino > quantidade
+            or origem == destino
+        ):
+            return
+
+        caminho = config_app.atalhos.pop(origem)
+        config_app.atalhos.insert(destino, caminho)
+        config_app.salvar()
+        self.atualizar_botoes_atalhos()
 
     def adicionar_novo_atalho(self):
         novo_caminho, _ = QFileDialog.getOpenFileName(self, "Selecionar Atalho/Executável", "", "Executáveis/Atalhos (*.exe *.lnk *.bat);;Todos os Arquivos (*.*)")

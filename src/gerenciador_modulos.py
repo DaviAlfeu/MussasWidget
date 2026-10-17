@@ -2,6 +2,7 @@ import os
 import ast
 import importlib.util
 import json
+import re
 import time
 import tempfile
 import urllib.request
@@ -36,6 +37,24 @@ def _extrair_versao_modulo(conteudo):
                 if isinstance(instrucao.value, ast.Constant) and isinstance(instrucao.value.value, str):
                     return instrucao.value.value
     return None
+
+
+def _tupla_versao_modulo(versao):
+    if not isinstance(versao, str) or not re.fullmatch(r"\d+(?:\.\d+){0,3}", versao.strip()):
+        return None
+    return tuple(int(parte) for parte in versao.strip().split("."))
+
+
+def _versao_modulo_mais_nova(remota, local):
+    remota_partes = _tupla_versao_modulo(remota)
+    local_partes = _tupla_versao_modulo(local)
+    if remota_partes is None or local_partes is None:
+        return False
+    tamanho = max(len(remota_partes), len(local_partes))
+    return (
+        remota_partes + (0,) * (tamanho - len(remota_partes))
+        > local_partes + (0,) * (tamanho - len(local_partes))
+    )
 
 
 CACHE_MODULOS = os.path.join(APPDATA_DIR, "modulos_github_cache.json")
@@ -86,6 +105,8 @@ def listar_modulos_github():
 
     modulos_por_nome = {}
     for entrada in entradas:
+        if not isinstance(entrada, dict):
+            continue
         nome = entrada.get("name", "")
         url = entrada.get("download_url")
         if (entrada.get("type") == "file" and isinstance(nome, str)
@@ -104,6 +125,8 @@ def listar_modulos_github():
                 "nome": nome,
                 "url": url,
                 "versao": versao,
+                "versao_local": None,
+                "atualizacao_disponivel": False,
                 "local": False
             }
 
@@ -120,20 +143,26 @@ def listar_modulos_github():
 
                 chave = nome.casefold()
                 modulo = modulos_por_nome.get(chave)
-                if modulo is not None:
-                    modulo["local"] = True
-                    continue
-
-                versao = None
                 try:
                     with open(arquivo.path, "rb") as arquivo_modulo:
-                        versao = _extrair_versao_modulo(arquivo_modulo.read())
+                        versao_local = _extrair_versao_modulo(arquivo_modulo.read())
                 except OSError:
-                    pass
+                    versao_local = None
+
+                if modulo is not None:
+                    modulo["local"] = True
+                    modulo["versao_local"] = versao_local
+                    modulo["desativado"] = desativado
+                    modulo["atualizacao_disponivel"] = _versao_modulo_mais_nova(
+                        modulo.get("versao"), versao_local
+                    )
+                    continue
+
                 modulos_por_nome[chave] = {
                     "nome": nome,
                     "url": None,
-                    "versao": versao,
+                    "versao": versao_local,
+                    "versao_local": versao_local,
                     "local": True,
                     "desativado": desativado
                 }
@@ -147,6 +176,14 @@ def listar_modulos_github():
 
 
 def baixar_modulo_github(nome, url):
+    return _instalar_modulo_github(nome, url)
+
+
+def atualizar_modulo_github(nome, url, versao_esperada):
+    return _instalar_modulo_github(nome, url, versao_esperada)
+
+
+def _instalar_modulo_github(nome, url, versao_esperada=None):
     if (not isinstance(nome, str) or not nome.endswith(".py")
             or os.path.basename(nome) != nome):
         raise ValueError("Nome de módulo inválido.")
@@ -157,13 +194,36 @@ def baixar_modulo_github(nome, url):
     with urllib.request.urlopen(requisicao, timeout=30) as resposta:
         conteudo = resposta.read()
 
+    versao_recebida = _extrair_versao_modulo(conteudo)
+    if versao_recebida is None:
+        raise ValueError("O arquivo remoto não contém uma versão de módulo válida.")
+    try:
+        arvore = ast.parse(conteudo.decode("utf-8-sig"))
+    except (UnicodeDecodeError, SyntaxError) as erro:
+        raise ValueError("O código remoto não passou na validação de sintaxe.") from erro
+    if not any(
+        isinstance(no, ast.ClassDef) and no.name == "Plugin"
+        for no in arvore.body
+    ):
+        raise ValueError("O arquivo remoto não define uma classe Plugin.")
+    if versao_esperada is not None and versao_recebida != versao_esperada:
+        raise ValueError(
+            f"A versão recebida ({versao_recebida}) não corresponde à "
+            f"versão esperada ({versao_esperada}). Atualize a lista e tente novamente."
+        )
+
+    destino = os.path.join(PASTA_MODULOS, nome)
+    destino_desativado = destino + ".disabled"
+    if not os.path.exists(destino) and os.path.exists(destino_desativado):
+        destino += ".disabled"
+
     descritor, caminho_temporario = tempfile.mkstemp(
         prefix=".modulo_", suffix=".tmp", dir=PASTA_MODULOS
     )
     try:
         with os.fdopen(descritor, "wb") as arquivo:
             arquivo.write(conteudo)
-        os.replace(caminho_temporario, os.path.join(PASTA_MODULOS, nome))
+        os.replace(caminho_temporario, destino)
     except Exception:
         if os.path.exists(caminho_temporario):
             os.remove(caminho_temporario)
@@ -287,6 +347,9 @@ class GerenciadorModulos:
             )
             for no in arvore.body
         )
+
+    def modulo_carregado(self, arquivo):
+        return arquivo in self._registros_modulos
 
     def abrir_configuracoes_modulo(self, arquivo, parent=None):
         registro = self._registros_modulos.get(arquivo)
