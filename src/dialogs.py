@@ -5,7 +5,8 @@ from datetime import date
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QCheckBox, QLabel, QSlider, QHBoxLayout, 
     QPushButton, QComboBox, QWidget, QStackedWidget, QGridLayout, QScrollArea,
-    QApplication, QMessageBox, QInputDialog, QTabWidget, QStyle, QDialogButtonBox
+    QApplication, QMessageBox, QInputDialog, QTabWidget, QStyle, QDialogButtonBox,
+    QTextBrowser
 )
 from PyQt6.QtCore import Qt, QEvent, QPoint, QRect, QTimer
 from PyQt6.QtGui import QColor, QPainter, QFont, QPixmap, QPainterPath
@@ -23,6 +24,43 @@ from utils import (
 from ui_components import BlurredBackgroundFrame, OutlineLabel, ClickableMes, ClickableLabel, MarqueeLabel, WrapLabel
 from gerenciador_modulos import PASTA_MODULOS, estado_modulo
 from workers import WorkerModulosGitHub
+
+
+class ChangelogDialog(QDialog):
+    def __init__(self, notas, parent=None):
+        super().__init__(parent)
+        versao = notas.get("version", "desconhecida")
+        self.setWindowTitle(f"Atualização instalada — versão {versao}")
+        self.setMinimumSize(420, 320)
+        self.setWindowFlags(
+            self.windowFlags() & ~Qt.WindowType.WindowContextHelpButtonHint
+        )
+
+        layout = QVBoxLayout(self)
+        titulo = QLabel(f"MussasWidget {versao}")
+        titulo.setStyleSheet("font-size: 16px; font-weight: bold;")
+        layout.addWidget(titulo)
+
+        nome_release = notas.get("name")
+        if nome_release and nome_release != f"Versão {versao}":
+            layout.addWidget(QLabel(nome_release))
+
+        navegador = QTextBrowser()
+        navegador.setOpenExternalLinks(True)
+        corpo = notas.get("body") or ""
+        if corpo:
+            navegador.setMarkdown(corpo)
+        else:
+            erro = notas.get("error")
+            navegador.setPlainText(
+                erro
+                or "Esta release não possui alterações descritas."
+            )
+        layout.addWidget(navegador, 1)
+
+        botoes = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
+        botoes.accepted.connect(self.accept)
+        layout.addWidget(botoes)
 
 
 class PreviewBolinhas(QWidget):

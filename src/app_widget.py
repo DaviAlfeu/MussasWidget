@@ -15,7 +15,14 @@ from PyQt6.QtWidgets import (
     QStackedWidget, QScrollArea, QComboBox, QSlider, QMessageBox, QProgressDialog,
     QFileDialog, QInputDialog, QFileIconProvider
 )
-from updater import baixar_atualizacao, iniciar_aplicacao_da_atualizacao, registrar_log, pasta_updates
+from updater import (
+    baixar_atualizacao,
+    iniciar_aplicacao_da_atualizacao,
+    obter_notas_release,
+    pasta_updates,
+    registrar_log,
+    salvar_notas_release_pendentes,
+)
 from PyQt6.QtCore import (
     Qt, QTimer, QUrl, QPoint, QRect, pyqtSignal,
     QPropertyAnimation, QParallelAnimationGroup, QEasingCurve, QAbstractAnimation, QEvent, QSharedMemory,
@@ -950,6 +957,23 @@ class WidgetFrutigerAero(QWidget):
                 
             resposta_msg = QMessageBox.question(self, "Atualização disponível", f"Uma nova versão está disponível!\n\nAtual: {APP_VERSION}\nNova: {versao_remota}\n\nDeseja baixar e instalar agora?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.Yes)
             if resposta_msg != QMessageBox.StandardButton.Yes: return
+
+            try:
+                notas_release = obter_notas_release(versao_remota)
+            except Exception as erro_release:
+                registrar_log(
+                    f"nao foi possivel obter notas da release {versao_remota}: "
+                    f"{erro_release!r}"
+                )
+                notas_release = {
+                    "version": versao_remota,
+                    "name": f"Versão {versao_remota}",
+                    "body": "",
+                    "error": (
+                        "Não foi possível obter as notas desta versão.\n\n"
+                        f"Detalhes: {erro_release}"
+                    ),
+                }
                 
             progresso = QProgressDialog("Baixando atualização...", None, 0, 100, self)
             progresso.setWindowTitle("Atualizando")
@@ -966,6 +990,7 @@ class WidgetFrutigerAero(QWidget):
             finally:
                 progresso.close()
 
+            salvar_notas_release_pendentes(notas_release)
             QMessageBox.information(self, "Download Concluído", "A atualização foi baixada com sucesso!\n\nO aplicativo será reiniciado agora.")
             iniciar_aplicacao_da_atualizacao(novo_exe)
             os._exit(0)

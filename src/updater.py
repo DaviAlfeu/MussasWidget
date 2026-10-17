@@ -3,8 +3,11 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
+import json
 import urllib.request
+import urllib.parse
 from pathlib import Path
 
 from config import APPDATA_DIR
@@ -22,6 +25,73 @@ def pasta_updates():
     caminho = Path(APPDATA_DIR) / "updates"
     caminho.mkdir(parents=True, exist_ok=True)
     return caminho
+
+
+def obter_notas_release(versao):
+    """Busca as notas de uma release GitHub pelo tag da versão."""
+    tag = versao if str(versao).startswith("v") else f"v{versao}"
+    url = (
+        "https://api.github.com/repos/DaviAlfeu/MussasWidget/releases/tags/"
+        f"{urllib.parse.quote(tag, safe='')}"
+    )
+    requisicao = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "MussasWidget-Updater",
+        },
+    )
+    with urllib.request.urlopen(requisicao, timeout=15) as resposta:
+        release = json.loads(resposta.read().decode("utf-8"))
+    if not isinstance(release, dict):
+        raise ValueError("A resposta da release não é válida.")
+    return {
+        "version": str(versao),
+        "name": str(release.get("name") or f"Versão {versao}"),
+        "body": str(release.get("body") or ""),
+    }
+
+
+def salvar_notas_release_pendentes(notas):
+    """Guarda as notas para que a nova versão as mostre após reiniciar."""
+    destino = pasta_updates() / "pending_release_notes.json"
+    descritor, temporario = tempfile.mkstemp(
+        prefix=".release_notes_", suffix=".tmp", dir=destino.parent
+    )
+    try:
+        with os.fdopen(descritor, "w", encoding="utf-8") as arquivo:
+            json.dump(notas, arquivo, ensure_ascii=False)
+        os.replace(temporario, destino)
+    except Exception:
+        if os.path.exists(temporario):
+            os.remove(temporario)
+        raise
+
+
+def consumir_notas_release_pendentes(versao_atual):
+    """Retorna e remove as notas pendentes somente para a versão instalada."""
+    caminho = pasta_updates() / "pending_release_notes.json"
+    try:
+        with open(caminho, "r", encoding="utf-8") as arquivo:
+            notas = json.load(arquivo)
+    except FileNotFoundError:
+        return None
+    except (OSError, json.JSONDecodeError) as erro:
+        registrar_log(f"notas de release pendentes invalidas: {erro!r}")
+        try:
+            caminho.unlink()
+        except OSError:
+            pass
+        return None
+
+    if not isinstance(notas, dict) or notas.get("version") != versao_atual:
+        return None
+
+    try:
+        caminho.unlink()
+    except OSError as erro:
+        registrar_log(f"nao foi possivel remover notas pendentes: {erro!r}")
+    return notas
 
 
 def registrar_log(mensagem):

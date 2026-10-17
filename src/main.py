@@ -3,8 +3,11 @@ import signal
 import crashlog
 from updater import tratar_argumentos_de_atualizacao, limpar_updates_antigos
 from PyQt6.QtWidgets import QApplication, QStyleFactory
-from PyQt6.QtCore import QSharedMemory
+from PyQt6.QtCore import QSharedMemory, QTimer
 from app_widget import WidgetFrutigerAero
+from config import APP_VERSION
+from dialogs import ChangelogDialog
+from updater import consumir_notas_release_pendentes
 
 if __name__ == '__main__':
     codigo_update = tratar_argumentos_de_atualizacao(sys.argv)
@@ -38,5 +41,11 @@ if __name__ == '__main__':
     
     widget = WidgetFrutigerAero()
     widget.show()
+
+    notas_release = consumir_notas_release_pendentes(APP_VERSION)
+    if notas_release is not None:
+        QTimer.singleShot(
+            0, lambda notas=notas_release: ChangelogDialog(notas, widget).exec()
+        )
     
     sys.exit(app.exec())
