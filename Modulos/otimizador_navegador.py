@@ -421,7 +421,7 @@ def _restaurar_modo_jogo_processo(estado):
 
 class Plugin(PluginBase):
     nome = "Otimizador de navegador"
-    versao = "1.0.0"
+    versao = "0.1.0"
 
     def __init__(self, app):
         super().__init__(app)
