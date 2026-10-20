@@ -46,6 +46,27 @@
     return "";
   }
 
+  function youtubeMusicUrl(row) {
+    const link = row.querySelector(
+      'a[href*="/watch?"]'
+    );
+    if (!link) return "";
+    try {
+      const url = new URL(link.href, location.href);
+      if (
+        url.hostname !== "music.youtube.com"
+        || url.username
+        || url.password
+        || (url.port && url.port !== "443")
+        || url.pathname !== "/watch"
+        || !/^[A-Za-z0-9_-]{11}$/.test(url.searchParams.get("v") || "")
+      ) return "";
+      return url.href;
+    } catch {
+      return "";
+    }
+  }
+
   function readTrack(row) {
     let title = firstText(row, [
       '[data-testid="internal-track-link"]',
@@ -53,7 +74,7 @@
       ".title",
       ".trackItem__trackTitle",
       "a[href*='/track/']",
-      "a[href*='watch?v=']",
+      "a[href*='/watch?']",
       "[title]"
     ]);
     if (!title) return null;
@@ -64,7 +85,11 @@
       ".trackItem__username",
       "a[href*='/artist/']"
     ]);
-    return { title: title.slice(0, 200), artist: artist.slice(0, 200) };
+    const track = { title: title.slice(0, 200), artist: artist.slice(0, 200) };
+    if (provider === "youtube_music") {
+      track.url = youtubeMusicUrl(row);
+    }
+    return track;
   }
 
   function collectTracks() {

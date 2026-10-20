@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "MussasWidget Music Bridge",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Passa para o MussasWidget as faixas de filas abertas em players Web.",
   "background": {
     "service_worker": "service_worker.js"

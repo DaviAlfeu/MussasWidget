@@ -747,7 +747,10 @@ class WidgetFrutigerAero(QWidget):
         area = self._area_segura_pagina()
         for pagina in self.paginas:
             pagina.setProperty("mussas_safe_area", area)
-            pagina.setMask(QRegion(area))
+            if pagina.property("mussas_full_page_hit_area"):
+                pagina.setMask(QRegion(0, 0, 150, 150))
+            else:
+                pagina.setMask(QRegion(area))
 
         if hasattr(self, "stacked_atalhos"):
             self._ajustar_geometria_atalhos()

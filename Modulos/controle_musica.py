@@ -5,21 +5,25 @@ import re
 import secrets
 import time
 import threading
+import unicodedata
 from ctypes import wintypes
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlsplit
 
 from PyQt6.QtCore import (
-    QEvent, QObject, QPoint, QPointF, QPropertyAnimation, QRectF, QThread, QTimer, Qt, QSize,
+    QEvent, QObject, QPoint, QPointF, QPropertyAnimation, QRectF, QThread, QTimer, Qt, QSize, QUrl,
     QEasingCurve, pyqtSignal
 )
 from PyQt6.QtGui import (
-    QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
+    QColor, QDesktopServices, QIcon, QPainter, QPainterPath, QPen, QPixmap,
+    QPolygonF
 )
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
     QGraphicsOpacityEffect, QHBoxLayout,
-    QLabel, QListWidget, QPushButton, QSlider, QStackedWidget, QStyle,
+    QLabel, QListWidget, QListWidgetItem, QMessageBox, QPushButton, QSlider,
+    QStackedWidget, QStyle, QSizePolicy,
     QVBoxLayout, QWidget
 )
 
@@ -27,7 +31,7 @@ from config import config_app
 from vidro import atualizar_vidro, esconder_vidro
 from utils import aplicar_css_fonte_base
 from gerenciador_modulos import PluginBase
-from ui_components import BlurredBackgroundFrame, ClickableLabel
+from ui_components import BlurredBackgroundFrame, ClickableLabel, MarqueeLabel
 
 try:
     from winrt.windows.media.control import (
@@ -64,6 +68,60 @@ class CapaMusicaLabel(ClickableLabel):
         x = (self.width() - imagem.width()) // 2
         y = (self.height() - imagem.height()) // 2
         painter.drawPixmap(x, y, imagem)
+
+
+class FaixaPlaylistLabel(MarqueeLabel):
+    doubleClicked = pyqtSignal(object)
+    interacted = pyqtSignal()
+
+    def __init__(self, text="", url="", parent=None):
+        super().__init__(text, parent)
+        self.url = url
+        self.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+        self.setMinimumWidth(0)
+        self.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
+        self.setMouseTracking(True)
+        self._timer.stop()
+        self.setStyleSheet("background: transparent; padding-left: 3px;")
+
+    def _reiniciar(self):
+        self._offset = 0.0
+        self._pausa = 35
+        self._timer.stop()
+        self.update()
+
+    def enterEvent(self, event):
+        super().enterEvent(event)
+        self.interacted.emit()
+        if self._excesso() > 0:
+            self._pausa = 20
+            self._timer.start()
+
+    def leaveEvent(self, event):
+        self._timer.stop()
+        self._offset = 0.0
+        self.update()
+        super().leaveEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.doubleClicked.emit(self.url or self.text())
+        super().mouseDoubleClickEvent(event)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setCompositionMode(
+            QPainter.CompositionMode.CompositionMode_Clear
+        )
+        painter.fillRect(self.rect(), Qt.GlobalColor.transparent)
+        painter.end()
+        super().paintEvent(event)
+
+    def mousePressEvent(self, event):
+        self.interacted.emit()
+        super().mousePressEvent(event)
 
 
 class WorkerSessoesMedia(QThread):
@@ -315,6 +373,29 @@ class PontePlaylistLocal:
     MAX_BYTES = 256 * 1024
     PROVEDORES = {"spotify", "youtube", "youtube_music", "soundcloud"}
 
+    @staticmethod
+    def _validar_url_faixa(valor):
+        if not isinstance(valor, str):
+            return ""
+        valor = valor.strip()
+        try:
+            url = urlsplit(valor)
+            porta = url.port
+        except ValueError:
+            return ""
+        query = parse_qs(url.query)
+        if (
+            url.scheme != "https"
+            or url.hostname != "music.youtube.com"
+            or url.username is not None
+            or url.password is not None
+            or porta not in (None, 443)
+            or url.path != "/watch"
+            or not re.fullmatch(r"[A-Za-z0-9_-]{11}", query.get("v", [""])[0])
+        ):
+            return ""
+        return valor
+
     def __init__(self, porta=None):
         self._token = secrets.token_urlsafe(32)
         self._lock = threading.Lock()
@@ -422,9 +503,14 @@ class PontePlaylistLocal:
                 continue
             if not isinstance(artista, str):
                 artista = ""
+            url = (
+                cls._validar_url_faixa(faixa.get("url"))
+                if provedor == "youtube_music" else ""
+            )
             resultado.append({
                 "title": titulo.strip()[:200],
                 "artist": artista.strip()[:200],
+                "url": url,
             })
         titulo_lista = dados.get("listTitle", "")
         if not isinstance(titulo_lista, str):
@@ -479,14 +565,17 @@ class WorkerPlaylistUIA(QThread):
     """Lê a lista de faixas exibida na janela do player via UI Automation (sem extensão)."""
 
     resultado = pyqtSignal(object)
+    faixa_selecionada = pyqtSignal(bool, str)
 
     ORCAMENTO_SEGUNDOS = 6.0
     ESCOPO_DESCENDENTES = 4
+    HOST_PERMITIDO = "music.youtube.com"
     TIPO_LINK = 50005
     TIPO_DOCUMENTO = 50030
     TIPO_ITEM_LISTA = 50007
     TIPO_ITEM_DADOS = 50029
     TIPO_TEXTO = 50020
+    TIPO_EDIT = 50004
     EXECUTAVEIS = (
         ("spotify", "spotify.exe", "Spotify"),
         ("chrome", "chrome.exe", "Chrome"),
@@ -513,17 +602,30 @@ class WorkerPlaylistUIA(QThread):
     _RELOGIO = re.compile(r"^\d{1,2}:\d{2}(?::\d{2})?$")
     _IGNORADOS = {"explicit", "explícito", "explicito", "lyrics", "live"}
 
-    def __init__(self, fonte, titulo_atual, parent=None):
+    def __init__(self, fonte, titulo_atual, faixa_alvo=None, parent=None):
         super().__init__(parent)
         self.fonte = fonte or ""
         self.titulo_atual = (titulo_atual or "").strip().lower()
+        self.faixa_alvo = faixa_alvo
 
     def run(self):
-        vazio = {"origem": "", "titulo_lista": "", "faixas": [], "atual": -1}
+        vazio = {
+            "origem": "", "titulo_lista": "", "faixas": [], "atual": -1,
+            "site": "",
+        }
         try:
-            self.resultado.emit(self._ler() or vazio)
+            if self.faixa_alvo is not None:
+                sucesso, mensagem = self._selecionar_faixa()
+                self.faixa_selecionada.emit(sucesso, mensagem)
+            else:
+                self.resultado.emit(self._ler() or vazio)
         except Exception:
-            self.resultado.emit(vazio)
+            if self.faixa_alvo is not None:
+                self.faixa_selecionada.emit(
+                    False, "Não foi possível selecionar essa faixa no navegador."
+                )
+            else:
+                self.resultado.emit(vazio)
 
     @staticmethod
     def _exe_do_processo(pid):
@@ -559,25 +661,77 @@ class WorkerPlaylistUIA(QThread):
             base += ".exe"
         return base, self.fonte.rsplit("!", 1)[-1] or "Player"
 
+    @classmethod
+    def _host_da_url(cls, valor):
+        valor = (valor or "").strip()
+        if not valor:
+            return ""
+        if "://" not in valor and not re.match(r"^[a-z][a-z0-9+.-]*:", valor, re.I):
+            valor = "https://" + valor
+        try:
+            analisada = urlsplit(valor)
+            if analisada.scheme.lower() not in ("http", "https"):
+                return ""
+            host = (analisada.hostname or "").lower().rstrip(".")
+            if not host or re.search(r"[^a-z0-9.-]", host):
+                return ""
+            return host
+        except ValueError:
+            return ""
+
+    @classmethod
+    def _host_da_janela(cls, auto, janela):
+        for indice in range(1, 13):
+            campo = auto.Control(
+                searchFromControl=janela,
+                searchDepth=7,
+                searchInterval=0,
+                foundIndex=indice,
+                ControlType=cls.TIPO_EDIT,
+            )
+            if not campo.Exists(0, 0, printIfNotExist=False):
+                break
+            try:
+                valor = campo.GetValuePattern().Value
+            except Exception:
+                continue
+            host = cls._host_da_url(valor)
+            if host:
+                return host
+        titulo = (janela.Name or "").casefold()
+        if re.search(r"\byoutube\s+music\b", titulo):
+            return cls.HOST_PERMITIDO
+        return ""
+
+    def _janelas_do_player(self, auto):
+        exe = self._executavel_alvo()[0]
+        janelas = [
+            janela for janela in auto.GetRootControl().GetChildren()
+            if self._exe_do_processo(janela.ProcessId) == exe
+        ]
+
+        def prioridade(janela):
+            titulo = (janela.Name or "").lower()
+            if len(self.titulo_atual) >= 3 and self.titulo_atual in titulo:
+                return 0
+            if any(servico in titulo for servico in self.SERVICOS):
+                return 1
+            return 2
+
+        return sorted(janelas, key=prioridade)
+
     def _ler(self):
         import uiautomation as auto
 
-        exe, rotulo = self._executavel_alvo()
+        rotulo = self._executavel_alvo()[1]
         with auto.UIAutomationInitializerInThread():
-            janelas = [
-                janela for janela in auto.GetRootControl().GetChildren()
-                if self._exe_do_processo(janela.ProcessId) == exe
-            ]
-
-            def prioridade(janela):
-                titulo = (janela.Name or "").lower()
-                if len(self.titulo_atual) >= 3 and self.titulo_atual in titulo:
-                    return 0
-                return 1 if any(s in titulo for s in self.SERVICOS) else 2
-
-            janelas.sort(key=prioridade)
             prazo = time.monotonic() + self.ORCAMENTO_SEGUNDOS
-            for janela in janelas[:6]:
+            site_encontrado = ""
+            for janela in self._janelas_do_player(auto)[:6]:
+                host = self._host_da_janela(auto, janela)
+                if host != self.HOST_PERMITIDO:
+                    site_encontrado = site_encontrado or host
+                    continue
                 for tentativa in range(2):
                     elementos, pronto = self._coletar(auto, janela)
                     faixas = self._extrair_faixas(elementos)
@@ -595,6 +749,7 @@ class WorkerPlaylistUIA(QThread):
                             "titulo_lista": "Lista atual",
                             "faixas": faixas,
                             "atual": atual,
+                            "site": host,
                         }
                     # O navegador só expõe a página depois da primeira consulta.
                     if pronto or time.monotonic() >= prazo:
@@ -602,7 +757,107 @@ class WorkerPlaylistUIA(QThread):
                     time.sleep(1.2)
                 if time.monotonic() >= prazo:
                     break
-        return None
+            if site_encontrado:
+                return {"origem": rotulo, "faixas": [], "atual": -1,
+                        "site": site_encontrado}
+        return {"origem": rotulo, "faixas": [], "atual": -1, "site": ""}
+
+    @classmethod
+    def _normalizar_faixa(cls, texto):
+        texto = cls._FRASE_DURACAO.sub(" ", texto)
+        texto = re.sub(r"\b\d{1,2}:\d{2}(?::\d{2})?\b", " ", texto)
+        texto = re.sub(r"^\s*\d{1,3}[\s.\-–]+", "", texto)
+        texto = unicodedata.normalize("NFKD", texto).casefold()
+        texto = "".join(
+            caractere for caractere in texto
+            if not unicodedata.combining(caractere)
+        )
+        return re.sub(r"[^a-z0-9]+", " ", texto).strip()
+
+    @classmethod
+    def _pontuacao_correspondencia_faixa(cls, nome, alvo):
+        nome_normalizado = cls._normalizar_faixa(nome)
+        alvo_normalizado = cls._normalizar_faixa(alvo)
+        titulo = alvo.split(" — ", 1)[0].split(" – ", 1)[0]
+        titulo_normalizado = cls._normalizar_faixa(titulo)
+        if not nome_normalizado or not alvo_normalizado:
+            return 0.0
+        if nome_normalizado == alvo_normalizado:
+            return 3.0
+        if alvo_normalizado in nome_normalizado:
+            return 2.5
+        if titulo_normalizado and titulo_normalizado in nome_normalizado:
+            return 2.0
+        palavras_titulo = set(titulo_normalizado.split())
+        palavras_nome = set(nome_normalizado.split())
+        if len(palavras_titulo) < 3:
+            return 0.0
+        proporcao = len(palavras_titulo & palavras_nome) / len(palavras_titulo)
+        return proporcao if proporcao >= 0.8 else 0.0
+
+    def _selecionar_faixa(self):
+        import uiautomation as auto
+        from uiautomation.uiautomation import _AutomationClient
+
+        with auto.UIAutomationInitializerInThread():
+            ua = _AutomationClient.instance().IUIAutomation
+            for janela in self._janelas_do_player(auto)[:6]:
+                if self._host_da_janela(auto, janela) != self.HOST_PERMITIDO:
+                    continue
+                documentos = janela.Element.FindAll(
+                    self.ESCOPO_DESCENDENTES,
+                    ua.CreatePropertyCondition(
+                        auto.PropertyId.ControlTypeProperty,
+                        self.TIPO_DOCUMENTO,
+                    ),
+                )
+                condicao = None
+                for tipo in (
+                    self.TIPO_LINK, self.TIPO_ITEM_LISTA,
+                    self.TIPO_ITEM_DADOS, self.TIPO_TEXTO,
+                ):
+                    parcial = ua.CreatePropertyCondition(
+                        auto.PropertyId.ControlTypeProperty, tipo
+                    )
+                    condicao = (
+                        parcial if condicao is None
+                        else ua.CreateOrCondition(condicao, parcial)
+                    )
+                melhor_elemento = None
+                melhor_pontuacao = 0.0
+                for indice in range(documentos.Length):
+                    documento = documentos.GetElement(indice)
+                    itens = documento.FindAll(
+                        self.ESCOPO_DESCENDENTES, condicao
+                    )
+                    for indice_item in range(itens.Length):
+                        elemento = itens.GetElement(indice_item)
+                        nome = elemento.CurrentName or ""
+                        pontuacao = self._pontuacao_correspondencia_faixa(
+                            nome, self.faixa_alvo
+                        )
+                        if pontuacao > melhor_pontuacao:
+                            melhor_elemento = elemento
+                            melhor_pontuacao = pontuacao
+                if melhor_elemento is not None:
+                    controle = auto.Control(element=melhor_elemento)
+                    try:
+                        padrao = controle.GetPattern(auto.PatternId.InvokePattern)
+                    except Exception:
+                        padrao = None
+                    if padrao is not None and padrao.Invoke(waitTime=0.1):
+                        return True, ""
+                    try:
+                        legado = controle.GetLegacyIAccessiblePattern()
+                    except Exception:
+                        legado = None
+                    if legado is not None and legado.DoDefaultAction(waitTime=0.1):
+                        return True, ""
+        return False, (
+            f"Não foi possível abrir o link de “{self.faixa_alvo}”. "
+            "Para selecionar uma faixa sem mover o mouse, habilite a ponte "
+            "da extensão do MussasWidget."
+        )
 
     def _coletar(self, auto, janela):
         """Retorna (elementos, pronto); elementos = (tipo, nome, esq, topo, larg, alt)."""
@@ -782,7 +1037,7 @@ class WorkerPlaylistUIA(QThread):
 
 class Plugin(PluginBase):
     nome = "Música"
-    versao = "0.1.2"
+    versao = "0.1.6"
 
     def __init__(self, app):
         super().__init__(app)
@@ -873,20 +1128,26 @@ class Plugin(PluginBase):
 
         self.pagina_playlist = QWidget()
         layout_playlist = QVBoxLayout(self.pagina_playlist)
-        layout_playlist.setContentsMargins(2, 2, 2, 2)
+        layout_playlist.setContentsMargins(0, 0, 0, 0)
         layout_playlist.setSpacing(2)
         self.lista_playlist = QListWidget()
+        self.lista_playlist.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        self.lista_playlist.setUniformItemSizes(True)
+        self.lista_playlist.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
         self.lista_playlist.setStyleSheet(
-            "QListWidget { background: transparent; border: none; }"
+            "QListWidget { background: transparent; border: none; } "
+            "QListWidget::item { padding: 0; margin: 0; }"
         )
         self.estado_playlist = QLabel("")
         self.estado_playlist.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.estado_playlist.setWordWrap(True)
         self.estado_playlist.setFixedHeight(28)
         layout_playlist.addWidget(self.lista_playlist, 1)
-        layout_playlist.addStretch(1)
         layout_playlist.addWidget(self.estado_playlist)
-        layout_playlist.addStretch(1)
         self.lista_playlist.hide()
 
         self.pilha_capa.addWidget(self.pagina_capa)
@@ -915,7 +1176,6 @@ class Plugin(PluginBase):
         self.lista_playlist.itemClicked.connect(
             lambda _item: self._interacao_playlist()
         )
-
         self.combo_sessoes = QComboBox()
         self.combo_sessoes.setEditable(True)
         self.combo_sessoes.lineEdit().setReadOnly(True)
@@ -1020,8 +1280,11 @@ class Plugin(PluginBase):
         self._ponte_playlist = None
         self._erro_ponte_playlist = ""
         self._worker_playlist = None
+        self._worker_selecao_playlist = None
         self._playlist_uia = None
         self._playlist_uia_lida_em = 0.0
+        self._playlist_sessao_chave = None
+        self._playlist_worker_chave = None
         try:
             self._ponte_playlist = PontePlaylistLocal()
         except OSError as erro:
@@ -1151,7 +1414,12 @@ class Plugin(PluginBase):
             self._ponte_playlist = None
         return not any(
             worker is not None and worker.isRunning()
-            for worker in (self._worker, self._worker_estado, self._worker_playlist)
+            for worker in (
+                self._worker,
+                self._worker_estado,
+                self._worker_playlist,
+                self._worker_selecao_playlist,
+            )
         )
 
     def _criar_botao(self, icone, dica, comando, texto="", tamanho=24):
@@ -1287,11 +1555,18 @@ class Plugin(PluginBase):
             snapshot is not None
             and time.monotonic() - snapshot["received_at"] <= 8
         ):
+            if snapshot["provider"] != "youtube_music":
+                self._playlist_uia = None
+                self._exibir_playlist_indisponivel(
+                    {
+                        "spotify": "Spotify",
+                        "youtube": "YouTube",
+                        "soundcloud": "SoundCloud",
+                    }.get(snapshot["provider"], snapshot["provider"])
+                )
+                return
             provedor = {
-                "spotify": "Spotify",
-                "youtube": "YouTube",
                 "youtube_music": "YouTube Music",
-                "soundcloud": "SoundCloud",
             }[snapshot["provider"]]
             self._exibir_faixas(
                 provedor, snapshot["list_title"] or "Lista atual",
@@ -1300,11 +1575,15 @@ class Plugin(PluginBase):
                     if faixa["artist"] else faixa["title"]
                     for faixa in snapshot["tracks"]
                 ],
+                urls=[faixa.get("url", "") for faixa in snapshot["tracks"]],
             )
             return
 
         self._iniciar_leitura_playlist()
         resultado = self._playlist_uia
+        if resultado is not None and resultado.get("site") != WorkerPlaylistUIA.HOST_PERMITIDO:
+            self._exibir_playlist_indisponivel(resultado.get("site", ""))
+            return
         if resultado is not None and resultado["faixas"]:
             self._exibir_faixas(
                 resultado["origem"], resultado["titulo_lista"],
@@ -1314,6 +1593,9 @@ class Plugin(PluginBase):
         self.lista_playlist.clear()
         self.lista_playlist.hide()
         self.estado_playlist.setToolTip("")
+        if resultado is None and self.combo_sessoes.currentData() is None:
+            self._exibir_playlist_indisponivel("")
+            return
         self.estado_playlist.setText(
             "Procurando a lista..."
             if self._worker_playlist is not None or resultado is None else
@@ -1321,7 +1603,27 @@ class Plugin(PluginBase):
         )
         self.estado_playlist.show()
 
-    def _exibir_faixas(self, origem, titulo_lista, nomes, atual=-1):
+    def _exibir_playlist_indisponivel(self, site):
+        self.lista_playlist.clear()
+        self.lista_playlist.hide()
+        self.estado_playlist.setToolTip("")
+        if site:
+            if site == "youtube.com" or site.endswith(".youtube.com"):
+                nome_site = "YouTube"
+            elif site == "soundcloud.com" or site.endswith(".soundcloud.com"):
+                nome_site = "SoundCloud"
+            else:
+                nome_site = site
+            mensagem = (
+                f"Playlist indisponível no {nome_site}.\n"
+                "Disponível apenas no YouTube Music."
+            )
+        else:
+            mensagem = "Playlist disponível somente em music.youtube.com."
+        self.estado_playlist.setText(mensagem)
+        self.estado_playlist.show()
+
+    def _exibir_faixas(self, origem, titulo_lista, nomes, atual=-1, urls=None):
         self.estado_playlist.setToolTip("")
         self.estado_playlist.setText(
             f"{origem} · {titulo_lista} · {len(nomes)} faixas"
@@ -1330,15 +1632,80 @@ class Plugin(PluginBase):
         )
         self.estado_playlist.setVisible(not nomes)
         self.lista_playlist.setVisible(bool(nomes))
-        existentes = [
-            self.lista_playlist.item(indice).text()
+        urls = urls or []
+        faixas_atuais = [
+            (
+                self.lista_playlist.item(indice).text(),
+                self.lista_playlist.item(indice).data(
+                    Qt.ItemDataRole.UserRole + 1
+                ),
+            )
             for indice in range(self.lista_playlist.count())
         ]
-        if nomes != existentes:
+        faixas_novas = [
+            (nome, urls[indice] if indice < len(urls) else "")
+            for indice, nome in enumerate(nomes)
+        ]
+        if faixas_novas != faixas_atuais:
             self.lista_playlist.clear()
-            self.lista_playlist.addItems(nomes)
+            for indice, nome in enumerate(nomes):
+                url = faixas_novas[indice][1]
+                item = QListWidgetItem(nome)
+                item.setSizeHint(QSize(0, 22))
+                item.setData(Qt.ItemDataRole.UserRole, nome)
+                item.setData(Qt.ItemDataRole.UserRole + 1, url)
+                self.lista_playlist.addItem(item)
+                faixa = FaixaPlaylistLabel(nome, url, self.lista_playlist)
+                faixa.setStyleSheet(
+                    "background: transparent; padding-left: 3px; "
+                    f"color: {self.app.cor_texto}; "
+                    f"{aplicar_css_fonte_base('cal_lista')}"
+                )
+                faixa.interacted.connect(self._interacao_playlist)
+                faixa.doubleClicked.connect(
+                    self._selecionar_faixa_playlist
+                )
+                self.lista_playlist.setItemWidget(item, faixa)
         if 0 <= atual < self.lista_playlist.count():
             self.lista_playlist.setCurrentRow(atual)
+
+    def _selecionar_faixa_playlist(self, destino):
+        if self._encerrando or self._worker_selecao_playlist is not None:
+            return
+        if destino and PontePlaylistLocal._validar_url_faixa(destino):
+            if not QDesktopServices.openUrl(QUrl(destino)):
+                QMessageBox.warning(
+                    self.app,
+                    "Playlist",
+                    "Não foi possível abrir o link da música no navegador "
+                    "padrão.",
+                )
+            return
+        texto_faixa = destino
+        chave = self.combo_sessoes.currentData()
+        sessao = next(
+            (item for item in self._sessoes if item["chave"] == chave), None
+        )
+        if sessao is None:
+            return
+        worker = WorkerPlaylistUIA(
+            sessao["fonte"],
+            sessao["titulo"],
+            faixa_alvo=texto_faixa,
+            parent=self.app,
+        )
+        self._worker_selecao_playlist = worker
+        worker.faixa_selecionada.connect(self._faixa_playlist_selecionada)
+        worker.finished.connect(self._worker_selecao_playlist_finalizado)
+        worker.finished.connect(worker.deleteLater)
+        worker.start()
+
+    def _faixa_playlist_selecionada(self, sucesso, mensagem):
+        if not sucesso and mensagem:
+            QMessageBox.warning(self.app, "Playlist", mensagem)
+
+    def _worker_selecao_playlist_finalizado(self):
+        self._worker_selecao_playlist = None
 
     def _iniciar_leitura_playlist(self):
         if self._encerrando or self._worker_playlist is not None:
@@ -1355,6 +1722,7 @@ class Plugin(PluginBase):
         worker = WorkerPlaylistUIA(
             sessao["fonte"], sessao["titulo"], parent=self.app
         )
+        self._playlist_worker_chave = chave
         self._worker_playlist = worker
         worker.resultado.connect(self._playlist_lida)
         worker.finished.connect(self._worker_playlist_finalizado)
@@ -1363,9 +1731,12 @@ class Plugin(PluginBase):
 
     def _worker_playlist_finalizado(self):
         self._worker_playlist = None
+        self._playlist_worker_chave = None
 
     def _playlist_lida(self, resultado):
         if self._encerrando:
+            return
+        if self._playlist_worker_chave != self.combo_sessoes.currentData():
             return
         self._playlist_uia = resultado
         self._playlist_uia_lida_em = time.monotonic()
@@ -1464,6 +1835,10 @@ class Plugin(PluginBase):
 
     def _selecionar_sessao(self):
         chave = self.combo_sessoes.currentData()
+        if chave != self._playlist_sessao_chave:
+            self._playlist_sessao_chave = chave
+            self._playlist_uia = None
+            self._playlist_uia_lida_em = 0.0
         sessao = next((item for item in self._sessoes if item["chave"] == chave), None)
         if sessao is None:
             self.titulo.setText("Nenhuma mídia encontrada")
