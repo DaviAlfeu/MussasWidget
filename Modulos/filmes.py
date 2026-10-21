@@ -5,12 +5,14 @@ import urllib.request
 import uuid
 from urllib.parse import urlsplit
 
-from PyQt6.QtCore import QEvent, QObject, QThread, Qt, QSize, QTimer, pyqtSignal
+from PyQt6.QtCore import (
+    QEvent, QObject, QThread, Qt, QRect, QSize, QTimer, pyqtSignal,
+)
 from PyQt6.QtGui import QColor, QImage, QPainter, QPixmap, QRegion
 from PyQt6.QtWidgets import (
     QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QLabel,
     QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton,
-    QSizePolicy, QSpinBox, QStackedLayout, QStackedWidget, QTextEdit,
+    QSizePolicy, QSpinBox, QStackedWidget, QTextBrowser, QTextEdit,
     QVBoxLayout, QWidget,
 )
 
@@ -88,6 +90,7 @@ class NomeFilmeLabel(MarqueeLabel):
         self.setMinimumWidth(0)
         self.setFixedHeight(22)
         self.setAttribute(Qt.WidgetAttribute.WA_NoMousePropagation)
+        self._hovered = False
         self.setSizePolicy(
             QSizePolicy.Policy.Expanding,
             QSizePolicy.Policy.Fixed,
@@ -107,11 +110,14 @@ class NomeFilmeLabel(MarqueeLabel):
 
     def enterEvent(self, evento):
         super().enterEvent(evento)
+        self._hovered = True
+        self.update()
         if self._excesso() > 0:
             self._pausa = 10
             self._timer.start()
 
     def leaveEvent(self, evento):
+        self._hovered = False
         self._timer.stop()
         self._offset = 0.0
         self.update()
@@ -123,6 +129,10 @@ class NomeFilmeLabel(MarqueeLabel):
             QPainter.CompositionMode.CompositionMode_Clear
         )
         painter.fillRect(self.rect(), Qt.GlobalColor.transparent)
+        painter.end()
+        painter = QPainter(self)
+        opacidade = 255 if self._hovered else 3
+        painter.fillRect(self.rect(), QColor(128, 128, 128, opacidade))
         painter.end()
         if self._excesso() <= 0:
             OutlineLabel.paintEvent(self, evento)
@@ -157,11 +167,14 @@ class ImagemFilmeLabel(QLabel):
 
     def receber_resultado(self, dados, erro):
         if isinstance(dados, QImage) and not dados.isNull():
+            pixmap = QPixmap.fromImage(dados).scaled(
+                self.size(), Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            x = (pixmap.width() - self.width()) // 2
+            y = (pixmap.height() - self.height()) // 2
             self.setPixmap(
-                QPixmap.fromImage(dados).scaled(
-                    self.size(), Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation,
-                )
+                pixmap.copy(QRect(x, y, self.width(), self.height()))
             )
             self.setToolTip("")
         else:
@@ -176,8 +189,31 @@ class ImagemFilmeLabel(QLabel):
         super().mousePressEvent(evento)
 
 
-class DescricaoFilmeLabel(QLabel):
+class DescricaoFilmeLabel(QTextBrowser):
     clicado = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setFrameShape(QTextBrowser.Shape.NoFrame)
+        self.setReadOnly(True)
+        self.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
+
+    def wheelEvent(self, evento):
+        deslocamento = evento.pixelDelta().y()
+        if deslocamento == 0:
+            delta = evento.angleDelta().y()
+            if delta == 0:
+                evento.ignore()
+                return
+            deslocamento = round(
+                delta / 120 * self.verticalScrollBar().singleStep() * 3
+            )
+        self.verticalScrollBar().setValue(
+            self.verticalScrollBar().value() - deslocamento
+        )
+        evento.accept()
 
     def mousePressEvent(self, evento):
         if evento.button() == Qt.MouseButton.LeftButton:
@@ -241,7 +277,7 @@ class PainelFilmesFrame(BlurredBackgroundFrame):
 
 class Plugin(PluginBase):
     nome = "Filmes"
-    versao = "0.1.0"
+    versao = "0.1.3"
 
     def __init__(self, app):
         super().__init__(app)
@@ -275,11 +311,11 @@ class Plugin(PluginBase):
         self.busca = QLineEdit()
         self.busca.setPlaceholderText("Buscar filme")
         self.busca.setClearButtonEnabled(False)
-        self.busca.setFixedHeight(28)
+        self.busca.setFixedHeight(20)
         self.busca.textChanged.connect(self._atualizar_botao_limpar_busca)
         self.busca.textChanged.connect(self._atualizar_lista)
         self.botao_adicionar = QPushButton("+")
-        self.botao_adicionar.setFixedSize(22, 24)
+        self.botao_adicionar.setFixedSize(20, 20)
         self.botao_adicionar.setToolTip("Adicionar filme")
         self.botao_adicionar.setCursor(Qt.CursorShape.PointingHandCursor)
         self.botao_adicionar.clicked.connect(self._abrir_adicao)
@@ -290,7 +326,7 @@ class Plugin(PluginBase):
             self.botao_adicionar, 0, Qt.AlignmentFlag.AlignVCenter
         )
         layout.addLayout(barra_busca)
-        layout.addSpacing(22)
+        layout.addSpacing(1)
 
         self.lista = QListWidget()
         self.lista.setFrameShape(QListWidget.Shape.NoFrame)
@@ -332,13 +368,16 @@ class Plugin(PluginBase):
         self.painel_filme.setWindowFlags(flags)
         self.painel_filme.setObjectName("painelDetalheFilme")
         self.painel_filme.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.painel_filme.setFixedSize(150, 230)
+        self.painel_filme.setFixedSize(150, 195)
         painel_layout = QVBoxLayout(self.painel_filme)
-        painel_layout.setContentsMargins(8, 7, 8, 7)
-        painel_layout.setSpacing(3)
+        painel_layout.setContentsMargins(8, 5, 8, 5)
+        painel_layout.setSpacing(0)
 
         cabecalho = QWidget(self.painel_filme)
-        cabecalho.setFixedHeight(20)
+        cabecalho.setFixedHeight(41)
+        cabecalho_layout = QVBoxLayout(cabecalho)
+        cabecalho_layout.setContentsMargins(0, 0, 0, 0)
+        cabecalho_layout.setSpacing(1)
         self.titulo_painel = MarqueeLabel("")
         self.titulo_painel.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.titulo_painel.setAttribute(
@@ -348,39 +387,42 @@ class Plugin(PluginBase):
             QSizePolicy.Policy.Ignored,
             QSizePolicy.Policy.Preferred,
         )
-        self.titulo_painel.setFixedHeight(20)
-        self.botao_editar = QPushButton("✎")
-        self.botao_editar.setFixedSize(20, 20)
+        self.titulo_painel.setFixedHeight(18)
+        self.botao_editar = QPushButton("✏️ Editar")
+        self.botao_editar.setFixedHeight(20)
+        self.botao_editar.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Fixed,
+        )
         self.botao_editar.setToolTip("Editar filme")
+        self.botao_editar.setCursor(Qt.CursorShape.PointingHandCursor)
         self.botao_editar.clicked.connect(self._editar_filme_atual)
         self.botao_fechar = QPushButton("×")
         self.botao_fechar.setFixedSize(20, 20)
         self.botao_fechar.setToolTip("Fechar")
         self.botao_fechar.clicked.connect(self._esconder_painel)
-        cabecalho_pilha = QStackedLayout(cabecalho)
-        cabecalho_pilha.setContentsMargins(0, 0, 0, 0)
-        cabecalho_pilha.setStackingMode(
-            QStackedLayout.StackingMode.StackAll
-        )
-        cabecalho_pilha.addWidget(self.titulo_painel)
-        controles_cabecalho = QWidget(cabecalho)
-        controles_layout = QHBoxLayout(controles_cabecalho)
+        controles_layout = QHBoxLayout()
         controles_layout.setContentsMargins(0, 0, 0, 0)
         controles_layout.setSpacing(3)
-        controles_layout.addStretch(1)
         controles_layout.addWidget(self.botao_editar)
         controles_layout.addWidget(self.botao_fechar)
-        cabecalho_pilha.addWidget(controles_cabecalho)
+        cabecalho_layout.addLayout(controles_layout)
+        cabecalho_layout.addWidget(self.titulo_painel)
         painel_layout.addWidget(cabecalho)
 
-        self.pilha_detalhes = QStackedWidget()
+        self.conteudo_detalhe = QWidget()
+        self.conteudo_detalhe.setFixedSize(118, 136)
+        self.pilha_detalhes = QStackedWidget(self.conteudo_detalhe)
+        self.pilha_detalhes.setGeometry(0, 0, 118, 118)
         self.imagem_filme = ImagemFilmeLabel()
         self.imagem_filme.clicado.connect(self._alternar_descricao)
         self.descricao_filme = DescricaoFilmeLabel()
         self.descricao_filme.setAlignment(
             Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft
         )
-        self.descricao_filme.setWordWrap(True)
+        self.descricao_filme.setLineWrapMode(
+            QTextEdit.LineWrapMode.WidgetWidth
+        )
         self.descricao_filme.setFixedSize(118, 118)
         self.descricao_filme.setCursor(Qt.CursorShape.PointingHandCursor)
         self.descricao_filme.setToolTip("Clique para voltar à imagem")
@@ -388,14 +430,13 @@ class Plugin(PluginBase):
         self.descricao_filme.clicado.connect(self._alternar_descricao)
         self.pilha_detalhes.addWidget(self.imagem_filme)
         self.pilha_detalhes.addWidget(self.descricao_filme)
-        painel_layout.addWidget(
-            self.pilha_detalhes, 0, Qt.AlignmentFlag.AlignHCenter
-        )
 
-        self.ano_filme = QLabel()
+        self.ano_filme = QLabel(self.conteudo_detalhe)
+        self.ano_filme.setGeometry(0, 118, 118, 18)
         self.ano_filme.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.ano_filme.setFixedHeight(18)
-        painel_layout.addWidget(self.ano_filme)
+        painel_layout.addWidget(
+            self.conteudo_detalhe, 0, Qt.AlignmentFlag.AlignHCenter
+        )
 
         self._filme_atual_id = None
         self._filtro_janela = FiltroJanelaFilmes(self)
@@ -409,16 +450,15 @@ class Plugin(PluginBase):
 
     def ao_mudar_area_pagina(self, area):
         x, y, largura, altura = area
-        self.conteudo.setGeometry(x, y - 6, largura, altura + 6)
+        self.conteudo.setGeometry(x, y, largura, altura)
 
     def ao_aplicar_tema(self):
         cor = self.app.cor_texto
         self.busca.setStyleSheet(
-            aplicar_css_fonte_base("cal_lista")
-            + "font-family: 'Segoe UI'; font-size: 8px; font-weight: bold; "
+            aplicar_css_fonte_base("data")
             + f"color: {cor}; background: rgba(35, 35, 35, 210); "
             "border: 1px solid rgba(180, 180, 180, 170); "
-            "border-radius: 5px; padding: 3px 0;"
+            "border-radius: 5px; padding: 0;"
         )
         self.botao_adicionar.setStyleSheet(
             "QPushButton { background: rgba(120, 120, 120, 80); border: none; "
@@ -433,10 +473,10 @@ class Plugin(PluginBase):
             aplicar_css_fonte_base("cal_titulo") + f"color: {cor};"
         )
         self.ano_filme.setStyleSheet(
-            aplicar_css_fonte_base("data") + f"color: {cor};"
+            aplicar_css_fonte_base("cal_titulo") + f"color: {cor};"
         )
         self.descricao_filme.setStyleSheet(
-            aplicar_css_fonte_base("cal_lista") + f"color: {cor};"
+            aplicar_css_fonte_base("data") + f"color: {cor};"
         )
         estilo_botao = (
             "QPushButton { background: rgba(120, 120, 120, 80); "
@@ -730,12 +770,13 @@ class Plugin(PluginBase):
         possui_detalhes = bool(
             filme["imagem_url"] or filme["descricao"] or filme["ano"]
         )
-        self.painel_filme.setFixedSize(150, 230 if possui_detalhes else 48)
-        self.pilha_detalhes.setVisible(possui_detalhes)
+        self.painel_filme.setFixedSize(150, 195 if possui_detalhes else 62)
+        self.conteudo_detalhe.setVisible(possui_detalhes)
+        self.pilha_detalhes.show()
         self.ano_filme.setVisible(filme["ano"] is not None)
         self.titulo_painel.setText(filme["nome"])
         self.ano_filme.setText(str(filme["ano"]) if filme["ano"] is not None else "")
-        self.descricao_filme.setText(
+        self.descricao_filme.setPlainText(
             filme["descricao"] or "Nenhuma descrição cadastrada."
         )
         self.pilha_detalhes.setCurrentWidget(self.imagem_filme)
