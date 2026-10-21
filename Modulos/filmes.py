@@ -316,7 +316,7 @@ class ListaFilmesWidget(QListWidget):
 
 class Plugin(PluginBase):
     nome = "Filmes"
-    versao = "0.1.3"
+    versao = "1.0.0"
 
     def __init__(self, app):
         super().__init__(app)
