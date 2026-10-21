@@ -153,6 +153,15 @@ class NomeFilmeLabel(MarqueeLabel):
             return
         evento.ignore()
 
+    def wheelEvent(self, evento):
+        widget = self.parentWidget()
+        while widget is not None and not isinstance(widget, ListaFilmesWidget):
+            widget = widget.parentWidget()
+        if widget is not None:
+            widget.wheelEvent(evento)
+            return
+        evento.ignore()
+
 
 class ImagemFilmeLabel(QLabel):
     clicado = pyqtSignal()
@@ -275,6 +284,36 @@ class PainelFilmesFrame(BlurredBackgroundFrame):
         super().paintEvent(evento)
 
 
+class ListaFilmesWidget(QListWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.viewport().installEventFilter(self)
+
+    def eventFilter(self, observado, evento):
+        if (
+            observado is self.viewport()
+            and evento.type() == QEvent.Type.Wheel
+        ):
+            self.wheelEvent(evento)
+            return True
+        return super().eventFilter(observado, evento)
+
+    def wheelEvent(self, evento):
+        deslocamento = evento.pixelDelta().y()
+        if deslocamento == 0:
+            delta = evento.angleDelta().y()
+            if delta == 0:
+                evento.ignore()
+                return
+            deslocamento = round(
+                delta / 120 * self.verticalScrollBar().singleStep() * 3
+            )
+        self.verticalScrollBar().setValue(
+            self.verticalScrollBar().value() - deslocamento
+        )
+        evento.accept()
+
+
 class Plugin(PluginBase):
     nome = "Filmes"
     versao = "0.1.3"
@@ -287,7 +326,9 @@ class Plugin(PluginBase):
         if not isinstance(self._config, dict):
             self._config = {}
             config_app.config_modulos[CHAVE_CONFIG] = self._config
-        if self._config.get("ordem") not in ("alfabetica", "cronologica"):
+        if self._config.get("ordem") not in (
+            "alfabetica", "cronologica", "status"
+        ):
             self._config["ordem"] = "alfabetica"
         self._workers_imagem = []
 
@@ -328,12 +369,15 @@ class Plugin(PluginBase):
         layout.addLayout(barra_busca)
         layout.addSpacing(1)
 
-        self.lista = QListWidget()
+        self.lista = ListaFilmesWidget()
         self.lista.setFrameShape(QListWidget.Shape.NoFrame)
         self.lista.setAutoFillBackground(False)
         self.lista.setAttribute(Qt.WidgetAttribute.WA_NoMousePropagation)
         self.lista.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.lista.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.lista.setVerticalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
         self.lista.setStyleSheet(
@@ -356,7 +400,9 @@ class Plugin(PluginBase):
         layout.addWidget(self.lista)
 
         self.estado = QLabel()
-        self.estado.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.estado.setAlignment(
+            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft
+        )
         self.estado.setWordWrap(True)
         self.estado.setStyleSheet("background: transparent;")
         layout.addWidget(self.estado)
@@ -379,7 +425,9 @@ class Plugin(PluginBase):
         cabecalho_layout.setContentsMargins(0, 0, 0, 0)
         cabecalho_layout.setSpacing(1)
         self.titulo_painel = MarqueeLabel("")
-        self.titulo_painel.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.titulo_painel.setAlignment(
+            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft
+        )
         self.titulo_painel.setAttribute(
             Qt.WidgetAttribute.WA_TransparentForMouseEvents
         )
@@ -433,7 +481,9 @@ class Plugin(PluginBase):
 
         self.ano_filme = QLabel(self.conteudo_detalhe)
         self.ano_filme.setGeometry(0, 118, 118, 18)
-        self.ano_filme.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.ano_filme.setAlignment(
+            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft
+        )
         painel_layout.addWidget(
             self.conteudo_detalhe, 0, Qt.AlignmentFlag.AlignHCenter
         )
@@ -496,6 +546,9 @@ class Plugin(PluginBase):
         ordem = QComboBox()
         ordem.addItem("Ordem alfabética", "alfabetica")
         ordem.addItem("Ordem cronológica (ano)", "cronologica")
+        ordem.addItem(
+            "Por status (assistido, incompleto, não assistido)", "status"
+        )
         indice = ordem.findData(self._config["ordem"])
         ordem.setCurrentIndex(max(0, indice))
         formulario.addRow("Ordenar lista:", ordem)
@@ -596,6 +649,19 @@ class Plugin(PluginBase):
         return True
 
     def _filmes_ordenados(self):
+        if self._config["ordem"] == "status":
+            prioridade_status = {
+                "assistido": 0,
+                "incompleto": 1,
+                "nao_assistido": 2,
+            }
+            return sorted(
+                self._filmes,
+                key=lambda filme: (
+                    prioridade_status[filme["status"]],
+                    filme["nome"].casefold(),
+                ),
+            )
         if self._config["ordem"] == "cronologica":
             return sorted(
                 self._filmes,
@@ -688,6 +754,33 @@ class Plugin(PluginBase):
             QDialogButtonBox.StandardButton.Save
             | QDialogButtonBox.StandardButton.Cancel
         )
+        botao_excluir = botoes.addButton(
+            "Excluir filme", QDialogButtonBox.ButtonRole.DestructiveRole
+        )
+        filme_excluido = False
+
+        def excluir():
+            resposta = QMessageBox.question(
+                dialogo,
+                "Excluir filme",
+                f'Tem certeza que deseja excluir "{filme["nome"]}"?',
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if resposta != QMessageBox.StandardButton.Yes:
+                return
+            filmes = [
+                dict(item) for item in self._filmes
+                if item["id"] != identificador
+            ]
+            if not self._salvar_filmes(filmes):
+                return
+            nonlocal filme_excluido
+            filme_excluido = True
+            self._filme_atual_id = None
+            self._atualizar_lista()
+            self._esconder_painel()
+            dialogo.accept()
 
         def confirmar():
             nome_final = nome.text().strip()
@@ -843,6 +936,33 @@ class Plugin(PluginBase):
             QDialogButtonBox.StandardButton.Save
             | QDialogButtonBox.StandardButton.Cancel
         )
+        botao_excluir = botoes.addButton(
+            "Excluir filme", QDialogButtonBox.ButtonRole.DestructiveRole
+        )
+        filme_excluido = False
+
+        def excluir():
+            resposta = QMessageBox.question(
+                dialogo,
+                "Excluir filme",
+                f'Tem certeza que deseja excluir "{filme["nome"]}"?',
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if resposta != QMessageBox.StandardButton.Yes:
+                return
+            filmes = [
+                dict(item) for item in self._filmes
+                if item["id"] != identificador
+            ]
+            if not self._salvar_filmes(filmes):
+                return
+            nonlocal filme_excluido
+            filme_excluido = True
+            self._filme_atual_id = None
+            self._atualizar_lista()
+            self._esconder_painel()
+            dialogo.accept()
 
         def confirmar():
             nome_final = nome.text().strip()
@@ -872,8 +992,11 @@ class Plugin(PluginBase):
 
         botoes.accepted.connect(confirmar)
         botoes.rejected.connect(dialogo.reject)
+        botao_excluir.clicked.connect(excluir)
         layout.addWidget(botoes)
         if dialogo.exec() != QDialog.DialogCode.Accepted:
+            return
+        if filme_excluido:
             return
 
         filmes = [dict(item) for item in self._filmes]
