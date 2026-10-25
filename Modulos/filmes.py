@@ -19,7 +19,7 @@ from PyQt6.QtWidgets import (
 from config import APPDATA_DIR, config_app
 from gerenciador_modulos import PluginBase
 from ui_components import BlurredBackgroundFrame, MarqueeLabel, OutlineLabel
-from utils import aplicar_css_fonte_base
+from utils import alpha_desfoque, aplicar_css_fonte_base
 from vidro import atualizar_vidro, esconder_vidro
 
 
@@ -131,8 +131,13 @@ class NomeFilmeLabel(MarqueeLabel):
         painter.fillRect(self.rect(), Qt.GlobalColor.transparent)
         painter.end()
         painter = QPainter(self)
-        opacidade = 255 if self._hovered else 3
-        painter.fillRect(self.rect(), QColor(128, 128, 128, opacidade))
+        opacidade = alpha_desfoque(
+            config_app.desfoque
+            if self._hovered else min(100, config_app.desfoque + 1)
+        )
+        cor_fundo = QColor(config_app.cor_base)
+        cor_fundo.setAlpha(opacidade)
+        painter.fillRect(self.rect(), cor_fundo)
         painter.end()
         if self._excesso() <= 0:
             OutlineLabel.paintEvent(self, evento)

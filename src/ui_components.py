@@ -213,7 +213,12 @@ class MarqueeLabel(OutlineLabel):
         metrics = painter.fontMetrics()
         largura = self._largura_texto()
         if self._excesso() > 0:
-            x = 3 - self._offset
+            if self.alignment() & Qt.AlignmentFlag.AlignLeft:
+                x = -self._offset
+            else:
+                x = 3 - self._offset
+        elif self.alignment() & Qt.AlignmentFlag.AlignLeft:
+            x = 0
         else:
             x = (self.width() - largura) / 2.0
         y = (self.height() + metrics.ascent() - metrics.descent()) / 2.0
