@@ -60,6 +60,15 @@ def _versao_modulo_mais_nova(remota, local):
 CACHE_MODULOS = os.path.join(APPDATA_DIR, "modulos_github_cache.json")
 VALIDADE_CACHE_S = 600
 
+MODULOS_PADRAO_FALLBACK = [
+    {"name": "aniversarios.py", "type": "file", "download_url": f"{URL_DOWNLOAD_MODULOS_GITHUB}main/Modulos/aniversarios.py"},
+    {"name": "atalhos.py", "type": "file", "download_url": f"{URL_DOWNLOAD_MODULOS_GITHUB}main/Modulos/atalhos.py"},
+    {"name": "controle_musica.py", "type": "file", "download_url": f"{URL_DOWNLOAD_MODULOS_GITHUB}main/Modulos/controle_musica.py"},
+    {"name": "filmes.py", "type": "file", "download_url": f"{URL_DOWNLOAD_MODULOS_GITHUB}main/Modulos/filmes.py"},
+    {"name": "monitor_pc.py", "type": "file", "download_url": f"{URL_DOWNLOAD_MODULOS_GITHUB}main/Modulos/monitor_pc.py"},
+    {"name": "otimizador_navegador.py", "type": "file", "download_url": f"{URL_DOWNLOAD_MODULOS_GITHUB}main/Modulos/otimizador_navegador.py"},
+]
+
 
 def _ler_cache():
     try:
@@ -83,10 +92,10 @@ def _obter_entradas_github():
         with urllib.request.urlopen(requisicao, timeout=15) as resposta:
             entradas = json.loads(resposta.read().decode("utf-8"))
     except Exception:
-        # Limite da API (403) ou sem rede: usa o cache antigo, se existir
+        # Limite da API (403) ou sem rede: usa o cache antigo, se existir, ou lista de fallback
         if isinstance(cache, dict) and isinstance(cache.get("entradas"), list):
             return cache["entradas"]
-        raise
+        return list(MODULOS_PADRAO_FALLBACK)
 
     if isinstance(entradas, list):
         try:
@@ -187,7 +196,9 @@ def _instalar_modulo_github(nome, url, versao_esperada=None):
     if (not isinstance(nome, str) or not nome.endswith(".py")
             or os.path.basename(nome) != nome):
         raise ValueError("Nome de módulo inválido.")
-    if not isinstance(url, str) or not url.startswith(URL_DOWNLOAD_MODULOS_GITHUB):
+    if not url or not isinstance(url, str):
+        url = f"{URL_DOWNLOAD_MODULOS_GITHUB}main/Modulos/{nome}"
+    if not url.startswith(URL_DOWNLOAD_MODULOS_GITHUB):
         raise ValueError("URL de download não permitida.")
 
     requisicao = urllib.request.Request(url, headers={"User-Agent": "MussasWidget"})
@@ -196,7 +207,7 @@ def _instalar_modulo_github(nome, url, versao_esperada=None):
 
     versao_recebida = _extrair_versao_modulo(conteudo)
     if versao_recebida is None:
-        raise ValueError("O arquivo remoto não contém uma versão de módulo válida.")
+        versao_recebida = "1.0.0"
     try:
         arvore = ast.parse(conteudo.decode("utf-8-sig"))
     except (UnicodeDecodeError, SyntaxError) as erro:
@@ -280,6 +291,7 @@ class PluginBase:
     """Classe base que todo módulo deve herdar."""
     nome = "Plugin"
     versao = "1.0.0"
+    dependencias = []
 
     def __init__(self, app):
         self.app = app
@@ -306,6 +318,28 @@ class PluginBase:
 
     def ao_mudar_area_pagina(self, area):
         """Chamado quando a área disponível das páginas muda."""
+        pass
+
+    def ao_reposicionar_container(self):
+        """Chamado quando o container do widget muda de tamanho ou posição (ex: top_panel abre/fecha)."""
+        pass
+
+    def fechar_paineis(self):
+        """Fecha quaisquer painéis flutuantes, janelas satélites ou diálogos abertos pelo módulo."""
+        for attr in ("painel_filme", "painel_capa", "janela_calendario", "painel"):
+            obj = getattr(self, attr, None)
+            if obj is not None and hasattr(obj, "isVisible") and obj.isVisible():
+                try:
+                    obj.hide()
+                except Exception:
+                    pass
+
+    def ao_desativar_pagina(self, pagina=None):
+        """Chamado quando o usuário sai da página deste módulo."""
+        self.fechar_paineis()
+
+    def ao_ativar_pagina(self, pagina=None):
+        """Chamado quando o usuário entra na página deste módulo."""
         pass
 
     def encerrar(self):
@@ -391,6 +425,8 @@ class GerenciadorModulos:
             self._registrar_plugin(plugin)
             paginas = [pagina for pagina in self.main_app.paginas if pagina not in paginas_antes]
             botoes = [botao for botao in self._botoes_topo_atuais() if botao not in botoes_antes]
+            for p in paginas:
+                p.setProperty("mussas_plugin", plugin)
             self.modulos_carregados.append(plugin)
             self._registros_modulos[arquivo] = {
                 "plugin": plugin,
@@ -529,3 +565,50 @@ class GerenciadorModulos:
                 plugin.ao_mudar_area_pagina(area)
             except Exception as e:
                 print(f"[Módulo] Erro em ao_mudar_area_pagina de '{plugin.nome}': {e}")
+
+    def notificar_geometria(self):
+        """Notifica todos os módulos sobre alteração de geometria/posição do container."""
+        for plugin in self.modulos_carregados:
+            try:
+                if hasattr(plugin, "ao_reposicionar_container"):
+                    plugin.ao_reposicionar_container()
+            except Exception as e:
+                print(f"[Módulo] Erro em ao_reposicionar_container de '{plugin.nome}': {e}")
+
+    def obter_plugin_da_pagina(self, pagina):
+        """Retorna a instância do plugin que registrou a página fornecida."""
+        if pagina is None:
+            return None
+        plugin = pagina.property("mussas_plugin")
+        if plugin is not None:
+            return plugin
+        for registro in self._registros_modulos.values():
+            if pagina in registro.get("paginas", []):
+                return registro.get("plugin")
+        return None
+
+    def notificar_troca_pagina(self, pagina_antiga, pagina_nova):
+        """Notifica os plugins quando ocorre troca de página no widget principal, fechando recursos da página anterior."""
+        plugin_antigo = self.obter_plugin_da_pagina(pagina_antiga)
+        plugin_novo = self.obter_plugin_da_pagina(pagina_nova)
+
+        if plugin_antigo is not None:
+            try:
+                plugin_antigo.ao_desativar_pagina(pagina_antiga)
+            except Exception as e:
+                print(f"[Módulo] Erro em ao_desativar_pagina de '{plugin_antigo.nome}': {e}")
+
+        if plugin_novo is not None:
+            try:
+                plugin_novo.ao_ativar_pagina(pagina_nova)
+            except Exception as e:
+                print(f"[Módulo] Erro em ao_ativar_pagina de '{plugin_novo.nome}': {e}")
+
+    def notificar_ocultar_todos(self):
+        """Fecha painéis e janelas satélites de todos os módulos quando o widget principal for ocultado."""
+        for plugin in self.modulos_carregados:
+            try:
+                plugin.fechar_paineis()
+            except Exception as e:
+                print(f"[Módulo] Erro em fechar_paineis de '{plugin.nome}': {e}")
+

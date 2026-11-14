@@ -44,92 +44,9 @@ from utils import (
     executar_atualizacao_bat, pasta_temporaria_widget,
     normalizar_cor_hex, aplicar_css_fonte_base
 )
-from workers import WorkerMonitorProcessos
 from ui_components import OutlineLabel, BlurredBackgroundFrame, ClickableLabel, WrapLabel
 from dialogs import JanelaConfiguracoes
 from vidro import atualizar_vidro, esconder_vidro
-
-LARGURA_DETALHE_ATALHO = 122
-LARGURA_NOME_ATALHO = 72
-
-
-class BotaoAtalhoArrastavel(QPushButton):
-    FORMATO_ARRASTO = "application/x-mussas-atalho"
-
-    def __init__(self, indice, ao_reordenar, parent=None, arrastavel=True):
-        super().__init__(parent)
-        self.indice_atalho = indice
-        self._ao_reordenar = ao_reordenar
-        self._arrastavel = arrastavel
-        self._posicao_press = None
-        self._arrasto_iniciado = False
-        self.setAcceptDrops(True)
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self._posicao_press = event.position().toPoint()
-        else:
-            self._posicao_press = None
-        super().mousePressEvent(event)
-
-    def mouseMoveEvent(self, event):
-        if (
-            not self._arrastavel
-            or self._posicao_press is None
-            or not event.buttons() & Qt.MouseButton.LeftButton
-            or (event.position().toPoint() - self._posicao_press).manhattanLength()
-            < QApplication.startDragDistance()
-        ):
-            super().mouseMoveEvent(event)
-            return
-
-        mime = QMimeData()
-        mime.setData(self.FORMATO_ARRASTO, str(self.indice_atalho).encode("ascii"))
-        arrasto = QDrag(self)
-        arrasto.setMimeData(mime)
-        arrasto.setPixmap(self.grab())
-        arrasto.setHotSpot(self._posicao_press)
-        self._arrasto_iniciado = True
-        self._posicao_press = None
-        arrasto.exec(Qt.DropAction.MoveAction)
-        self.setDown(False)
-        self._arrasto_iniciado = False
-
-    def mouseReleaseEvent(self, event):
-        if self._arrasto_iniciado:
-            self._arrasto_iniciado = False
-            self._posicao_press = None
-            event.accept()
-            return
-        self._posicao_press = None
-        super().mouseReleaseEvent(event)
-
-    def dragEnterEvent(self, event):
-        if event.mimeData().hasFormat(self.FORMATO_ARRASTO):
-            event.setDropAction(Qt.DropAction.MoveAction)
-            event.accept()
-        else:
-            event.ignore()
-
-    def dragMoveEvent(self, event):
-        if event.mimeData().hasFormat(self.FORMATO_ARRASTO):
-            event.setDropAction(Qt.DropAction.MoveAction)
-            event.accept()
-        else:
-            event.ignore()
-
-    def dropEvent(self, event):
-        if not event.mimeData().hasFormat(self.FORMATO_ARRASTO):
-            event.ignore()
-            return
-        try:
-            origem = int(bytes(event.mimeData().data(self.FORMATO_ARRASTO)).decode("ascii"))
-        except (UnicodeDecodeError, ValueError):
-            event.ignore()
-            return
-        self._ao_reordenar(origem, self.indice_atalho)
-        event.setDropAction(Qt.DropAction.MoveAction)
-        event.accept()
 
 
 class WidgetFrutigerAero(QWidget):
@@ -164,6 +81,7 @@ class WidgetFrutigerAero(QWidget):
         self.cor_texto = "#ffffff"
         self._vidro = None
         self.paginas = []  # Lista dinâmica de páginas (QWidgets)
+        self.espacamento_container = 4
 
         # Timer de inatividade: volta para página principal após 15s
         self.timer_inatividade = QTimer(self)
@@ -183,91 +101,27 @@ class WidgetFrutigerAero(QWidget):
         self.pages_container = QWidget(self)
         self.pages_container.setGeometry(24, 26, 150, 150)
 
-        # -- PÁGINA DE ATALHOS (sempre presente, é a base do app) --
-        self.page_atalhos = QWidget(self.pages_container)
-        self.page_atalhos.setGeometry(0, 0, 150, 150)
-        
-        self.stacked_atalhos = QStackedWidget(self.page_atalhos)
-        self.stacked_atalhos.setGeometry(0, 0, 150, 150)
-        
-        # Subpágina: Grelha com Scroll (3x3)
-        self.atalhos_grid_page = QWidget()
-        self.scroll_atalhos = QScrollArea(self.atalhos_grid_page)
-        self.scroll_atalhos.setGeometry(0, 0, 150, 150)
-        self.scroll_atalhos.setWidgetResizable(True)
-        self.scroll_atalhos.setStyleSheet("background: transparent; border: none;")
-        self.scroll_atalhos.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self.scroll_atalhos.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        
-        self.scroll_content_atalhos = QWidget()
-        self.scroll_content_atalhos.setStyleSheet("background: transparent;")
-        self.layout_atalhos = QGridLayout(self.scroll_content_atalhos)
-        self.layout_atalhos.setContentsMargins(10, 15, 10, 15)
-        self.layout_atalhos.setSpacing(8)
-        self.scroll_atalhos.setWidget(self.scroll_content_atalhos)
-        
-        # Subpágina: Detalhes do Atalho
-        self.atalhos_detail_page = QWidget()
-        layout_detalhes = QVBoxLayout(self.atalhos_detail_page)
-        layout_detalhes.setContentsMargins(5, 5, 5, MARGEM_AREA_ICONES)
-        layout_detalhes.setSpacing(4)
-        
-        self.btn_voltar_atalho = QPushButton("‹")
-        self.btn_voltar_atalho.setFixedSize(24, 24)
-        self.btn_voltar_atalho.setToolTip("Voltar")
-        self.btn_voltar_atalho.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_voltar_atalho.clicked.connect(self.fechar_detalhes_atalho)
-        
-        self.lbl_nome_atalho = WrapLabel("Nome do App", clicavel=True)
-        self.lbl_nome_atalho.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.lbl_nome_atalho.setToolTip("Clique para renomear")
-        self.lbl_nome_atalho.clicked.connect(self.renomear_atalho_atual)
-        
-        self.btn_abrir_atalho = QPushButton("Abrir")
-        self.btn_abrir_atalho.setFixedSize(LARGURA_DETALHE_ATALHO - 20, 26)
-        self.btn_abrir_atalho.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_abrir_atalho.clicked.connect(self.executar_atalho_atual)
-        
-        self.lbl_tempo_atalho = OutlineLabel("00:00:00")
-        self.lbl_tempo_atalho.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # -- PÁGINA SEM MÓDULOS (exibida quando nenhum módulo estiver ativo) --
+        self.page_sem_modulos = QWidget(self.pages_container)
+        self.page_sem_modulos.setGeometry(0, 0, 150, 150)
+        layout_sem_modulos = QVBoxLayout(self.page_sem_modulos)
+        layout_sem_modulos.setContentsMargins(14, 14, 14, 14)
+        layout_sem_modulos.setSpacing(8)
+        layout_sem_modulos.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        self.btn_apagar_atalho = QPushButton("🗑")
-        self.btn_apagar_atalho.setFixedSize(24, 24)
-        self.btn_apagar_atalho.setToolTip("Apagar atalho")
-        self.btn_apagar_atalho.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_apagar_atalho.clicked.connect(self.apagar_atalho_atual)
+        self.lbl_sem_modulos_logo = QLabel(self.page_sem_modulos)
+        self.lbl_sem_modulos_logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._carregar_logo_sem_modulos()
 
-        top_detalhes = QHBoxLayout()
-        top_detalhes.setContentsMargins(0, 0, 0, 0)
-        top_detalhes.setSpacing(2)
-        top_detalhes.addWidget(self.btn_voltar_atalho, alignment=Qt.AlignmentFlag.AlignTop)
-        top_detalhes.addStretch(1)
-        top_detalhes.addWidget(self.lbl_nome_atalho, alignment=Qt.AlignmentFlag.AlignTop)
-        top_detalhes.addStretch(1)
-        top_detalhes.addWidget(self.btn_apagar_atalho, alignment=Qt.AlignmentFlag.AlignTop)
+        self.btn_baixar_modulos = QPushButton("Baixar Módulos", self.page_sem_modulos)
+        self.btn_baixar_modulos.setFixedHeight(28)
+        self.btn_baixar_modulos.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_baixar_modulos.clicked.connect(lambda: JanelaConfiguracoes(self, aba_inicial="modulos").exec())
 
-        layout_detalhes.addLayout(top_detalhes)
-        layout_detalhes.addStretch(1)
-        layout_detalhes.addWidget(self.lbl_tempo_atalho)
-        layout_detalhes.addStretch(1)
-        layout_detalhes.addWidget(self.btn_abrir_atalho, alignment=Qt.AlignmentFlag.AlignHCenter)
-        self.stacked_atalhos.addWidget(self.atalhos_grid_page)
-        self.stacked_atalhos.addWidget(self.atalhos_detail_page)
-        self.stacked_atalhos.currentChanged.connect(lambda _: self._ajustar_geometria_atalhos())
-        self.atalho_atual_idx = None
-        self._ultimo_check_processos = time.monotonic()
-        self._nomes_processo_cache = {}
-
-        # Registrar a página de atalhos como a primeira página
-        self.page_atalhos.setProperty("mussas_page_key", "atalhos")
-        self.page_atalhos.setProperty("mussas_page_name", "Atalhos")
-        self.paginas.append(self.page_atalhos)
-        self.page_atalhos.show()
-        
-        # Iniciar Worker para monitorizar processos (Tempo de uso)
-        self.worker_processos = WorkerMonitorProcessos()
-        self.worker_processos.processos_atualizados.connect(self.processar_nomes_rodando)
-        self.worker_processos.start()
+        layout_sem_modulos.addStretch()
+        layout_sem_modulos.addWidget(self.lbl_sem_modulos_logo, 0, Qt.AlignmentFlag.AlignCenter)
+        layout_sem_modulos.addWidget(self.btn_baixar_modulos, 0, Qt.AlignmentFlag.AlignCenter)
+        layout_sem_modulos.addStretch()
 
         # -- PAINEL SUPERIOR --
         self.top_panel = QWidget(self)
@@ -343,13 +197,13 @@ class WidgetFrutigerAero(QWidget):
         from gerenciador_modulos import GerenciadorModulos
         self.gerenciador_modulos = GerenciadorModulos(self)
         self.gerenciador_modulos.carregar_modulos()
+
         self.pagina_atual = self._indice_pagina_principal()
 
         # Bolinhas indicadoras de página
         self._criar_dots_pagina()
 
         self.aplicar_tema()
-        self.atualizar_botoes_atalhos()
         
         pix = QPixmap(resource_path("assets/calendar.png"))
         self.configurar_bandeja(pix)
@@ -378,6 +232,7 @@ class WidgetFrutigerAero(QWidget):
         else:
             self.paginas.append(widget)
         self._aplicar_area_segura_paginas()
+        self._atualizar_estado_sem_modulos()
         return self.paginas.index(widget)
 
     def paginas_disponiveis(self):
@@ -386,7 +241,49 @@ class WidgetFrutigerAero(QWidget):
             for pagina in self.paginas
         ]
 
+    def _carregar_logo_sem_modulos(self):
+        caminho_logo = resource_path("assets/logo.png")
+        if os.path.exists(caminho_logo):
+            pixmap = QPixmap(caminho_logo)
+            if not pixmap.isNull():
+                pixmap = pixmap.scaled(
+                    54, 54, Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+                self.lbl_sem_modulos_logo.setPixmap(pixmap)
+                self.lbl_sem_modulos_logo.setText("")
+                return
+        self.lbl_sem_modulos_logo.setPixmap(QPixmap())
+        self.lbl_sem_modulos_logo.setText("🙂")
+        self.lbl_sem_modulos_logo.setStyleSheet("font-size: 42px; background: transparent;")
+
+    def _atualizar_estado_sem_modulos(self):
+        sem_modulos = len(self.paginas) == 0
+        if sem_modulos:
+            self.page_sem_modulos.show()
+            self.btn_nav_esq.hide()
+            self.btn_nav_dir.hide()
+        else:
+            self.page_sem_modulos.hide()
+            if len(self.paginas) > 1 and self._cursor_dentro_widget:
+                self.btn_nav_esq.show()
+                self.btn_nav_dir.show()
+
+    def rect_container_global(self):
+        """Retorna o QRect global exato do container central (150x150 em repouso, ou 150x176 quando o topo expande)."""
+        pos = self.mapToGlobal(self.container.pos())
+        return QRect(pos.x(), pos.y(), self.container.width(), self.container.height())
+
+    def notificar_geometria_alterada(self):
+        """Notifica módulos e janelas satélites quando a geometria do container muda."""
+        if hasattr(self, 'gerenciador_modulos') and self.gerenciador_modulos is not None:
+            self.gerenciador_modulos.notificar_geometria()
+        if hasattr(self, 'janela_calendario') and self.janela_calendario is not None and self.janela_calendario.isVisible():
+            self.janela_calendario._reposicionar_na_referencia()
+
     def _indice_pagina_principal(self):
+        if not self.paginas:
+            return 0
         chave = config_app.pagina_principal
         for indice, pagina in enumerate(self.paginas):
             if pagina.property("mussas_page_key") == chave:
@@ -408,271 +305,6 @@ class WidgetFrutigerAero(QWidget):
             self.top_layout.insertWidget(self._posicao_botoes_modulos, btn)
         self._posicao_botoes_modulos += 1
         return btn
-
-    # ---- FUNÇÕES DA PÁGINA DE ATALHOS ----
-    
-    def atualizar_botoes_atalhos(self):
-        for i in reversed(range(self.layout_atalhos.count())):
-            item = self.layout_atalhos.takeAt(i)
-            widget = item.widget()
-            if widget:
-                widget.deleteLater()
-
-        self.layout_atalhos.setContentsMargins(6, 6, 6, 6)
-        self.layout_atalhos.setSpacing(4)
-                
-        provider = QFileIconProvider()
-        max_colunas = 3
-        area = self._area_segura_pagina()
-        total_itens = len(config_app.atalhos) + 1
-        total_linhas = max(3, (total_itens + max_colunas - 1) // max_colunas)
-        largura_botao = (area.width() - 12 - 4 * (max_colunas - 1)) // max_colunas
-        altura_botao = (area.height() - 12 - 4 * (3 - 1)) // 3
-        tamanho_botao = max(12, min(36, largura_botao, altura_botao))
-        tamanho_icone = max(10, min(24, tamanho_botao - 8))
-        self.scroll_content_atalhos.setMinimumSize(
-            area.width(),
-            12 + total_linhas * tamanho_botao + 4 * (total_linhas - 1),
-        )
-        for indice in range(self.layout_atalhos.rowCount()):
-            self.layout_atalhos.setRowMinimumHeight(indice, 0)
-            self.layout_atalhos.setRowStretch(indice, 0)
-        for indice in range(max_colunas):
-            self.layout_atalhos.setColumnMinimumWidth(indice, tamanho_botao)
-            self.layout_atalhos.setColumnStretch(indice, 1)
-        for indice in range(total_linhas):
-            self.layout_atalhos.setRowMinimumHeight(indice, tamanho_botao)
-            self.layout_atalhos.setRowStretch(indice, 1)
-        
-        for idx, caminho in enumerate(config_app.atalhos):
-            btn = BotaoAtalhoArrastavel(idx, self.reordenar_atalho)
-            btn.setFixedSize(tamanho_botao, tamanho_botao)
-            btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.setToolTip("Arraste para reorganizar")
-            
-            if caminho and os.path.exists(caminho):
-                icon = provider.icon(QFileInfo(caminho))
-                btn.setIcon(icon)
-                btn.setIconSize(QSize(tamanho_icone, tamanho_icone))
-            else:
-                btn.setText("?")
-                
-            btn.clicked.connect(lambda checked, i=idx: self.abrir_detalhes_atalho(i))
-            btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-            btn.customContextMenuRequested.connect(lambda pos, i=idx: self.menu_atalho(pos, i))
-            
-            self.layout_atalhos.addWidget(btn, idx // max_colunas, idx % max_colunas)
-
-        btn_add = BotaoAtalhoArrastavel(
-            len(config_app.atalhos), self.reordenar_atalho, arrastavel=False
-        )
-        btn_add.setText("+")
-        btn_add.setFixedSize(tamanho_botao, tamanho_botao)
-        btn_add.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_add.setToolTip("Adicionar atalho ou solte aqui para movê-lo ao fim")
-        btn_add.clicked.connect(self.adicionar_novo_atalho)
-        self.layout_atalhos.addWidget(
-            btn_add, len(config_app.atalhos) // max_colunas,
-            len(config_app.atalhos) % max_colunas,
-        )
-
-        self.aplicar_estilos_aos_botoes_atalho()
-
-    def reordenar_atalho(self, origem, destino):
-        quantidade = len(config_app.atalhos)
-        if (
-            not isinstance(origem, int)
-            or not isinstance(destino, int)
-            or origem < 0
-            or origem >= quantidade
-            or destino < 0
-            or destino > quantidade
-            or origem == destino
-        ):
-            return
-
-        caminho = config_app.atalhos.pop(origem)
-        config_app.atalhos.insert(destino, caminho)
-        config_app.salvar()
-        self.atualizar_botoes_atalhos()
-
-    def adicionar_novo_atalho(self):
-        novo_caminho, _ = QFileDialog.getOpenFileName(self, "Selecionar Atalho/Executável", "", "Executáveis/Atalhos (*.exe *.lnk *.bat);;Todos os Arquivos (*.*)")
-        if novo_caminho:
-            config_app.atalhos.append(novo_caminho)
-            config_app.salvar()
-            self.atualizar_botoes_atalhos()
-
-    def menu_atalho(self, pos, idx):
-        menu = QMenu(self)
-        acao_remover = QAction("Remover Atalho", self)
-        acao_remover.triggered.connect(lambda: self.remover_atalho(idx))
-        
-        botao = None
-        for i in range(self.layout_atalhos.count()):
-            widget = self.layout_atalhos.itemAt(i).widget()
-            if isinstance(widget, QPushButton) and widget.underMouse():
-                botao = widget
-                break
-                
-        if botao:
-            menu.exec(botao.mapToGlobal(pos))
-            
-    def remover_atalho(self, idx):
-        if 0 <= idx < len(config_app.atalhos):
-            config_app.atalhos.pop(idx)
-            config_app.salvar()
-
-            if self.atalho_atual_idx == idx:
-                self.atalho_atual_idx = None
-                self.stacked_atalhos.setCurrentIndex(0)
-            elif self.atalho_atual_idx is not None and self.atalho_atual_idx > idx:
-                self.atalho_atual_idx -= 1
-
-            self.atualizar_botoes_atalhos()
-
-    def abrir_detalhes_atalho(self, idx):
-        self.atalho_atual_idx = idx
-        caminho = config_app.atalhos[idx]
-        self._definir_nome_atalho(self.nome_exibicao_atalho(caminho))
-        self.atualizar_label_tempo()
-        self.stacked_atalhos.setCurrentIndex(1)
-        self.aplicar_estilos_aos_botoes_atalho()
-
-    def _definir_nome_atalho(self, nome):
-        self.lbl_nome_atalho.setText(nome)
-        self.lbl_nome_atalho.ajustar_para_largura(LARGURA_NOME_ATALHO, max_linhas=2)
-
-    def nome_exibicao_atalho(self, caminho):
-        nome_custom = config_app.nomes_atalhos.get(caminho)
-        if nome_custom: return nome_custom
-        nome = os.path.basename(caminho) if caminho else "Atalho"
-        return os.path.splitext(nome)[0].capitalize()
-
-    def renomear_atalho_atual(self):
-        if self.atalho_atual_idx is None or self.atalho_atual_idx >= len(config_app.atalhos): return
-        caminho = config_app.atalhos[self.atalho_atual_idx]
-        nome_atual = self.lbl_nome_atalho.text()
-        novo_nome, ok = QInputDialog.getText(self, "Renomear Atalho", "Novo nome:", text=nome_atual)
-        if ok and novo_nome.strip():
-            config_app.nomes_atalhos[caminho] = novo_nome.strip()
-            config_app.salvar()
-            self._definir_nome_atalho(novo_nome.strip())
-
-    def fechar_detalhes_atalho(self):
-        self.stacked_atalhos.setCurrentIndex(0)
-        self.atalho_atual_idx = None
-
-    def apagar_atalho_atual(self):
-        if self.atalho_atual_idx is None or self.atalho_atual_idx >= len(config_app.atalhos): return
-        nome = self.lbl_nome_atalho.text()
-        resposta = QMessageBox.question(
-            self, "Apagar Atalho",
-            f"Tem certeza que deseja apagar o atalho \"{nome}\"?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No
-        )
-        if resposta == QMessageBox.StandardButton.Yes:
-            self.remover_atalho(self.atalho_atual_idx)
-
-    def executar_atalho_atual(self):
-        if self.atalho_atual_idx is not None and self.atalho_atual_idx < len(config_app.atalhos):
-            caminho = config_app.atalhos[self.atalho_atual_idx]
-            try:
-                os.startfile(caminho)
-            except Exception as e:
-                QMessageBox.warning(self, "Erro", f"Não foi possível abrir o atalho:\n{e}")
-
-    def atualizar_label_tempo(self):
-        if self.atalho_atual_idx is not None and self.atalho_atual_idx < len(config_app.atalhos):
-            caminho = config_app.atalhos[self.atalho_atual_idx]
-            segundos = int(config_app.tempos_uso.get(caminho, 0))
-            m, s = divmod(segundos, 60)
-            h, m = divmod(m, 60)
-            self.lbl_tempo_atalho.setText(f"{h:02d}:{m:02d}:{s:02d}")
-
-    def _nomes_processo_do_atalho(self, caminho):
-        caminho = os.path.abspath(caminho)
-        if caminho in self._nomes_processo_cache:
-            return self._nomes_processo_cache[caminho]
-
-        nomes = set()
-        nome = os.path.basename(caminho).lower()
-        base = os.path.splitext(nome)[0]
-
-        if nome: nomes.add(nome)
-        if base: nomes.add(base)
-
-        if caminho.lower().endswith(".lnk") and os.path.exists(caminho):
-            try:
-                comando = [
-                    "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
-                    "-Command",
-                    "$s=(New-Object -ComObject WScript.Shell).CreateShortcut($args[0]); "
-                    "[Console]::Write($s.TargetPath)", caminho
-                ]
-                alvo = subprocess.check_output(
-                    comando,
-                    creationflags=0x08000000,
-                    text=True,
-                    timeout=2
-                ).strip()
-
-                if alvo:
-                    alvo_nome = os.path.basename(alvo).lower()
-                    alvo_base = os.path.splitext(alvo_nome)[0]
-                    if alvo_nome: nomes.add(alvo_nome)
-                    if alvo_base: nomes.add(alvo_base)
-            except Exception:
-                pass
-
-        self._nomes_processo_cache[caminho] = nomes
-        return nomes
-
-    def processar_nomes_rodando(self, nomes_rodando):
-        agora = time.monotonic()
-
-        if not config_app.monitorar_tempo_atalhos:
-            self._ultimo_check_processos = agora
-            return
-
-        ultimo = self._ultimo_check_processos
-        self._ultimo_check_processos = agora
-        delta = max(0.0, min(1.5, agora - ultimo))
-
-        if delta <= 0:
-            return
-
-        houve_alteracao = False
-
-        for caminho in list(config_app.atalhos):
-            if not caminho:
-                continue
-
-            candidatos = self._nomes_processo_do_atalho(caminho)
-
-            is_running = any(
-                processo in candidatos or
-                any(
-                    processo.startswith(candidato)
-                    for candidato in candidatos
-                    if candidato
-                )
-                for processo in nomes_rodando
-            )
-
-            if is_running:
-                config_app.tempos_uso[caminho] = (
-                    config_app.tempos_uso.get(caminho, 0) + delta
-                )
-                houve_alteracao = True
-
-        if houve_alteracao:
-            if self.stacked_atalhos.currentIndex() == 1:
-                self.atualizar_label_tempo()
-
-            if int(time.time()) % 15 == 0:
-                config_app.salvar()
 
     # ---- INDICADOR DE PÁGINA ----
 
@@ -732,17 +364,6 @@ class WidgetFrutigerAero(QWidget):
         margem = MARGEM_AREA_ICONES
         return QRect(margem, margem, 150 - margem * 2, 150 - margem * 2)
 
-    def _ajustar_geometria_atalhos(self):
-        # O detalhe ocupa a página inteira para os botões ficarem rente às bordas
-        area = self._area_segura_pagina()
-        self.scroll_atalhos.setGeometry(0, 0, area.width(), area.height())
-        if self.stacked_atalhos.currentIndex() == 1:
-            self.stacked_atalhos.setGeometry(0, 0, 150, 150)
-            self.page_atalhos.clearMask()
-        else:
-            self.stacked_atalhos.setGeometry(area)
-            self.page_atalhos.setMask(QRegion(area))
-
     def _aplicar_area_segura_paginas(self):
         area = self._area_segura_pagina()
         for pagina in self.paginas:
@@ -751,10 +372,6 @@ class WidgetFrutigerAero(QWidget):
                 pagina.setMask(QRegion(0, 0, 150, 150))
             else:
                 pagina.setMask(QRegion(area))
-
-        if hasattr(self, "stacked_atalhos"):
-            self._ajustar_geometria_atalhos()
-            self.atualizar_botoes_atalhos()
 
         if hasattr(self, "gerenciador_modulos"):
             self.gerenciador_modulos.notificar_area_pagina(
@@ -848,6 +465,8 @@ class WidgetFrutigerAero(QWidget):
     def hideEvent(self, event):
         super().hideEvent(event)
         esconder_vidro(self)
+        if hasattr(self, 'gerenciador_modulos') and self.gerenciador_modulos is not None:
+            self.gerenciador_modulos.notificar_ocultar_todos()
 
     def cores_botoes(self):
         alpha = alpha_desfoque(config_app.desfoque)
@@ -906,13 +525,10 @@ class WidgetFrutigerAero(QWidget):
         self.btn_nav_esq.setStyleSheet(estilo)
         self.btn_nav_dir.setStyleSheet(estilo)
         
-        self.aplicar_estilos_aos_botoes_atalho()
-        
-        # Estilos das labels da página de atalhos
-        self.lbl_nome_atalho.atualizar_estilo(aplicar_css_fonte_base("lista"), self.cor_texto, self.borda_cor, self.esp_borda)
-        if self.atalho_atual_idx is not None:
-            self.lbl_nome_atalho.ajustar_para_largura(LARGURA_NOME_ATALHO, max_linhas=2)
-        self.lbl_tempo_atalho.atualizar_estilo(aplicar_css_fonte_base("nome"), self.cor_texto, self.borda_cor, self.esp_borda)
+        self.btn_baixar_modulos.setStyleSheet(
+            f"QPushButton {{ background-color: {bg_btn}; border-radius: 8px; color: {self.cor_texto}; font-weight: bold; font-size: 11px; padding: 4px 10px; border: none; }} "
+            f"QPushButton:hover {{ background-color: {bg_hover}; }}"
+        )
 
         # Notificar módulos sobre mudança de tema
         if hasattr(self, 'gerenciador_modulos'):
@@ -921,21 +537,6 @@ class WidgetFrutigerAero(QWidget):
         # Atualiza cor das bolinhas conforme o tema
         if hasattr(self, 'dots'):
             self._atualizar_dots_pagina()
-
-    def aplicar_estilos_aos_botoes_atalho(self):
-        bg_btn, bg_hover = self.cores_botoes()
-        estilo_atalhos = f"QPushButton {{ background-color: {bg_btn}; border-radius: 12px; color: {self.cor_texto}; font-weight: bold; font-size: 18px; border: none; }} QPushButton:hover {{ background-color: {bg_hover}; }}"
-        
-        for i in range(self.layout_atalhos.count()):
-            widget = self.layout_atalhos.itemAt(i).widget()
-            if isinstance(widget, QPushButton):
-                widget.setStyleSheet(estilo_atalhos)
-                
-        estilo_neutro = "QPushButton { background: rgba(120, 120, 120, 80); border: none; border-radius: 6px; color: %s; font-size: 14px; font-weight: bold; padding: 0; } QPushButton:hover { background: rgba(120, 120, 120, 150); }" % self.cor_texto
-        estilo_apagar = "QPushButton { background: rgba(120, 120, 120, 80); border: none; border-radius: 6px; color: %s; font-size: 12px; padding: 0; } QPushButton:hover { background: rgba(180, 35, 35, 150); }" % self.cor_texto
-        self.btn_voltar_atalho.setStyleSheet(estilo_neutro)
-        self.btn_abrir_atalho.setStyleSheet(estilo_neutro.replace("font-size: 14px", "font-size: 11px"))
-        self.btn_apagar_atalho.setStyleSheet(estilo_apagar)
 
     def verificar_atualizacoes(self, manual=False):
         if not getattr(sys, "frozen", False):
@@ -1048,6 +649,18 @@ class WidgetFrutigerAero(QWidget):
             start_x_in, end_x_out = -150, 150
             
         page_in = self.paginas[self.pagina_atual]
+
+        # Fechar tudo referente ao módulo anterior e popups abertos
+        if hasattr(self, 'gerenciador_modulos') and self.gerenciador_modulos is not None:
+            self.gerenciador_modulos.notificar_troca_pagina(page_out, page_in)
+
+        if getattr(self, "calendario_aberto", False) and getattr(self, "janela_calendario", None):
+            self.calendario_aberto = False
+            self.janela_calendario.hide()
+
+        for top in QApplication.topLevelWidgets():
+            if isinstance(top, QMenu) and top.isVisible():
+                top.close()
         
         for i, p in enumerate(self.paginas):
             if i != self.pagina_atual and p != page_out: p.hide()
@@ -1082,6 +695,7 @@ class WidgetFrutigerAero(QWidget):
             self.timer_inatividade.stop()
 
     def posicionar_elementos(self):
+        self._atualizar_estado_sem_modulos()
         if not self.anim_group or self.anim_group.state() != QAbstractAnimation.State.Running:
             for i, p in enumerate(self.paginas):
                 if i == self.pagina_atual:
@@ -1092,7 +706,7 @@ class WidgetFrutigerAero(QWidget):
                     p.hide()
 
         if self.calendario_aberto and self.janela_calendario:
-            self.janela_calendario.move(self.x() + 24, self.y() + self.height() + 5)
+            self.janela_calendario._reposicionar_na_referencia()
 
     def mousePressEvent(self, event):
         pos_y = event.position().y()

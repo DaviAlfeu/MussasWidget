@@ -243,7 +243,7 @@ class FiltroJanelaFilmes(QObject):
         self.plugin = plugin
 
     def eventFilter(self, observado, evento):
-        if observado is self.plugin.app and evento.type() in (
+        if observado in (self.plugin.app, getattr(self.plugin.app, "container", None)) and evento.type() in (
             QEvent.Type.Move, QEvent.Type.Resize
         ):
             self.plugin._posicionar_painel()
@@ -275,9 +275,28 @@ class PainelFilmesFrame(BlurredBackgroundFrame):
     def mousePressEvent(self, evento):
         evento.accept()
 
+    def showEvent(self, evento):
+        super().showEvent(evento)
+        self.atualizar_vidro_painel()
+
+    def moveEvent(self, evento):
+        super().moveEvent(evento)
+        if getattr(self, "_vidro", None) is not None and self._vidro.isVisible():
+            self.atualizar_vidro_painel()
+
     def resizeEvent(self, evento):
         super().resizeEvent(evento)
         self.setMask(QRegion(self.rect()))
+        if getattr(self, "_vidro", None) is not None and self._vidro.isVisible():
+            self.atualizar_vidro_painel()
+
+    def hideEvent(self, evento):
+        super().hideEvent(evento)
+        esconder_vidro(self)
+
+    def atualizar_vidro_painel(self):
+        if self.isVisible():
+            atualizar_vidro(self, self)
 
     def paintEvent(self, evento):
         painter = QPainter(self)
@@ -496,6 +515,8 @@ class Plugin(PluginBase):
         self._filme_atual_id = None
         self._filtro_janela = FiltroJanelaFilmes(self)
         self.app.installEventFilter(self._filtro_janela)
+        if hasattr(self.app, "container") and self.app.container is not None:
+            self.app.container.installEventFilter(self._filtro_janela)
         self.painel_filme.installEventFilter(self._filtro_janela)
         self.page.installEventFilter(self._filtro_janela)
 
@@ -759,33 +780,6 @@ class Plugin(PluginBase):
             QDialogButtonBox.StandardButton.Save
             | QDialogButtonBox.StandardButton.Cancel
         )
-        botao_excluir = botoes.addButton(
-            "Excluir filme", QDialogButtonBox.ButtonRole.DestructiveRole
-        )
-        filme_excluido = False
-
-        def excluir():
-            resposta = QMessageBox.question(
-                dialogo,
-                "Excluir filme",
-                f'Tem certeza que deseja excluir "{filme["nome"]}"?',
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
-            )
-            if resposta != QMessageBox.StandardButton.Yes:
-                return
-            filmes = [
-                dict(item) for item in self._filmes
-                if item["id"] != identificador
-            ]
-            if not self._salvar_filmes(filmes):
-                return
-            nonlocal filme_excluido
-            filme_excluido = True
-            self._filme_atual_id = None
-            self._atualizar_lista()
-            self._esconder_painel()
-            dialogo.accept()
 
         def confirmar():
             nome_final = nome.text().strip()
@@ -885,9 +879,9 @@ class Plugin(PluginBase):
             "Nenhuma descrição cadastrada. Clique para voltar à imagem."
         )
         self._posicionar_painel()
-        self._sincronizar_fundo_painel()
         self.painel_filme.show()
         self.painel_filme.raise_()
+        self._sincronizar_fundo_painel()
         self.painel_filme.layout().activate()
         self.pilha_detalhes.layout().activate()
 
@@ -1019,19 +1013,32 @@ class Plugin(PluginBase):
             self._abrir_filme(identificador)
 
     def _posicionar_painel(self):
-        area = self.app.container.geometry()
-        posicao = self.app.mapToGlobal(area.topLeft())
-        x = posicao.x() + (area.width() - self.painel_filme.width()) // 2
-        y = posicao.y() - self.painel_filme.height() - 10
+        if hasattr(self.app, "rect_container_global"):
+            rect = self.app.rect_container_global()
+        else:
+            area = self.app.container.geometry()
+            posicao = self.app.mapToGlobal(area.topLeft())
+            rect = QRect(posicao.x(), posicao.y(), area.width(), area.height())
+        espacamento = getattr(self.app, "espacamento_container", 4)
+        x = rect.left() + (rect.width() - self.painel_filme.width()) // 2
+        y = rect.top() - self.painel_filme.height() - espacamento
         self.painel_filme.move(x, y)
         if self.painel_filme.isVisible():
             self._atualizar_vidro_painel()
+
+    def ao_reposicionar_container(self):
+        if self.painel_filme.isVisible():
+            self._posicionar_painel()
 
     def _sincronizar_fundo_painel(self):
         self.painel_filme.overlay_color = self.app.container.overlay_color
         self.painel_filme.border_color = self.app.container.border_color
         self.painel_filme.border_radius = self.app.container.border_radius
         self.painel_filme.bg_pixmap = self.app.container.bg_pixmap
+        wp_path = getattr(self.app.container, "wp_path", None)
+        blur = getattr(self.app.container, "blur", 0)
+        if wp_path is not None:
+            self.painel_filme.update_background(wp_path, blur)
         self.painel_filme.update()
         if self.painel_filme.isVisible():
             self._atualizar_vidro_painel()
@@ -1052,6 +1059,13 @@ class Plugin(PluginBase):
         self.painel_filme.hide()
         esconder_vidro(self.painel_filme)
 
+    def fechar_paineis(self):
+        self._esconder_painel()
+        self._filme_atual_id = None
+
+    def ao_desativar_pagina(self, pagina=None):
+        self.fechar_paineis()
+
     def _remover_worker_imagem(self, worker):
         if worker in self._workers_imagem:
             self._workers_imagem.remove(worker)
@@ -1059,6 +1073,8 @@ class Plugin(PluginBase):
 
     def encerrar(self):
         self.app.removeEventFilter(self._filtro_janela)
+        if hasattr(self.app, "container") and self.app.container is not None:
+            self.app.container.removeEventFilter(self._filtro_janela)
         self.painel_filme.removeEventFilter(self._filtro_janela)
         self.page.removeEventFilter(self._filtro_janela)
         self._esconder_painel()

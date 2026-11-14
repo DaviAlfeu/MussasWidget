@@ -1,0 +1,14 @@
+
+
+Update não esta funcionando, consertar atualização automática.
+
+
+✅ Adicionar uma terceira pagina.
+✅ Terceira pagina tem uns botões com um [+] que voce pode adicionar atalhos personalizaveis.
+✅ Quando voce clicka no [+] ele vai abrir o explorer pra perguntar qual atalho voce quer inserir, e quando voce selecionar ele vai adicionar e mostrar o icone.
+❌ Quando voce clicka pra adicionar atalho nesse atalho ele mostra o quanto de tempo voce tem nele se quer executar.
+❌ Você pode ativar esse cronometro de quanto tempo voce tem na execução nas configurações esse "cronometro".
+
+Quando voce aperta no atalho, invés dele abrir o aplicativo direto, ele vai abrir uma espécie de página adicional e mostrar um botão pra abrir e abaixo um timer de quanto tempo você tem utilizando aquele aplicativo, quando você fecha ele para de contar, quando abre ele volta a contar, mesmo que você não abra pelo widget, se o widget tiver em segundo plano/aberto ele vai começar a contabilizar.
+
+Invés de uma grade de 4 aplicativos ou 2x2, faça com que seja uma grade de 3x3, e só apareça o botão de + pra adicionar mais um, por exemplo, invés de aparecer 9 botões de + vazio, ele aparece 1 botão de +, se você adiciona o atalho ele aparece um botão de + ao lado do atalho, e assim por diante, e faça com que ele va adicionando um scroll conforme for necessário

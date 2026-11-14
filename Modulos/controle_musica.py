@@ -33,19 +33,27 @@ from utils import aplicar_css_fonte_base
 from gerenciador_modulos import PluginBase
 from ui_components import BlurredBackgroundFrame, ClickableLabel, MarqueeLabel
 
-try:
-    from winrt.windows.media.control import (
-        GlobalSystemMediaTransportControlsSessionManager,
-        GlobalSystemMediaTransportControlsSessionPlaybackStatus,
-    )
-    from winrt.windows.storage.streams import DataReader
-except ImportError as erro:
-    GlobalSystemMediaTransportControlsSessionManager = None
-    GlobalSystemMediaTransportControlsSessionPlaybackStatus = None
-    DataReader = None
-    ERRO_WINRT = str(erro)
-else:
-    ERRO_WINRT = ""
+def _carregar_winrt():
+    global GlobalSystemMediaTransportControlsSessionManager
+    global GlobalSystemMediaTransportControlsSessionPlaybackStatus
+    global DataReader
+    global ERRO_WINRT
+    try:
+        from winrt.windows.media.control import (
+            GlobalSystemMediaTransportControlsSessionManager,
+            GlobalSystemMediaTransportControlsSessionPlaybackStatus,
+        )
+        from winrt.windows.storage.streams import DataReader
+        ERRO_WINRT = ""
+        return True
+    except ImportError as erro:
+        GlobalSystemMediaTransportControlsSessionManager = None
+        GlobalSystemMediaTransportControlsSessionPlaybackStatus = None
+        DataReader = None
+        ERRO_WINRT = str(erro)
+        return False
+
+_carregar_winrt()
 
 
 class CapaMusicaLabel(ClickableLabel):
@@ -152,6 +160,8 @@ class WorkerSessoesMedia(QThread):
             self.erro.emit(str(erro))
 
     async def _executar(self):
+        if GlobalSystemMediaTransportControlsSessionManager is None:
+            _carregar_winrt()
         if GlobalSystemMediaTransportControlsSessionManager is None:
             raise RuntimeError(
                 "Os componentes WinRT de mídia não estão instalados: " + ERRO_WINRT
@@ -1037,7 +1047,12 @@ class WorkerPlaylistUIA(QThread):
 
 class Plugin(PluginBase):
     nome = "Música"
-    versao = "0.1.6"
+    versao = "0.1.7"
+    dependencias = [
+        "winrt-Windows.Media.Control",
+        "winrt-Windows.Storage.Streams",
+        "uiautomation",
+    ]
 
     def __init__(self, app):
         super().__init__(app)
@@ -1340,6 +1355,10 @@ class Plugin(PluginBase):
         self.painel_capa.border_color = self.app.container.border_color
         self.painel_capa.border_radius = self.app.container.border_radius
         self.painel_capa.bg_pixmap = self.app.container.bg_pixmap
+        wp_path = getattr(self.app.container, "wp_path", None)
+        blur = getattr(self.app.container, "blur", 0)
+        if wp_path is not None:
+            self.painel_capa.update_background(wp_path, blur)
         self.painel_capa.update()
         if self.painel_capa.isVisible():
             self._atualizar_vidro_capa()
@@ -1443,13 +1462,22 @@ class Plugin(PluginBase):
         return botao
 
     def _posicionar_widgets(self):
-        area = self.app.container.geometry()
-        posicao = self.app.mapToGlobal(area.topLeft())
-        self.painel_capa.move(
-            posicao.x(), posicao.y() - self.painel_capa.height() - 10
-        )
+        if hasattr(self.app, "rect_container_global"):
+            rect = self.app.rect_container_global()
+        else:
+            area = self.app.container.geometry()
+            posicao = self.app.mapToGlobal(area.topLeft())
+            rect = QRect(posicao.x(), posicao.y(), area.width(), area.height())
+        espacamento = getattr(self.app, "espacamento_container", 4)
+        x = rect.left() + (rect.width() - self.painel_capa.width()) // 2
+        y = rect.top() - self.painel_capa.height() - espacamento
+        self.painel_capa.move(x, y)
         if self.painel_capa.isVisible():
             self._atualizar_vidro_capa()
+
+    def ao_reposicionar_container(self):
+        if self.painel_capa.isVisible():
+            self._posicionar_widgets()
 
     def _atualizar_vidro_capa(self):
         atualizar_vidro(self.painel_capa, self.painel_capa)
@@ -1466,6 +1494,19 @@ class Plugin(PluginBase):
     def _esconder_painel_capa(self):
         self.painel_capa.hide()
         esconder_vidro(self.painel_capa)
+
+    def fechar_paineis(self):
+        self._overlay_oculto = True
+        self.timer_playlist.stop()
+        self.timer_lista_playlist.stop()
+        self.timer_ocultar_overlay.stop()
+        self._animacao_capa.stop()
+        self._esconder_painel_capa()
+        self.pilha_capa.setCurrentWidget(self.pagina_capa)
+        self._atualizar_icone_overlay()
+
+    def ao_desativar_pagina(self, pagina=None):
+        self.fechar_paineis()
 
     def _atualizar_icone_overlay(self):
         aberto = not self._overlay_oculto

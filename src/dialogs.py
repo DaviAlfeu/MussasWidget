@@ -119,7 +119,7 @@ class PreviewBolinhas(QWidget):
 
 
 class JanelaConfiguracoes(QDialog):
-    def __init__(self, parent_widget):
+    def __init__(self, parent_widget, aba_inicial=None):
         super().__init__(parent_widget)
         self.parent_widget = parent_widget
         self.setWindowTitle("Configurações")
@@ -284,6 +284,13 @@ class JanelaConfiguracoes(QDialog):
         abas.addTab(pagina_personalizacao, "Personalização")
         abas.addTab(pagina_gerais, "Gerais")
         abas.addTab(pagina_modulos, "Módulos")
+
+        if aba_inicial == "modulos":
+            abas.setCurrentIndex(2)
+        elif aba_inicial == "gerais":
+            abas.setCurrentIndex(1)
+        else:
+            abas.setCurrentIndex(0)
         
         self.combo_tema.currentIndexChanged.connect(self.atualizar_preview)
         self.combo_tema.currentIndexChanged.connect(self.atualizar_preview_bolinhas)
@@ -954,17 +961,23 @@ class JanelaCalendario(QWidget):
     def set_referencia_widget(self, widget):
         if self._referencia_widget is not None:
             self._referencia_widget.removeEventFilter(self)
+            if hasattr(self._referencia_widget, "container") and self._referencia_widget.container is not None:
+                self._referencia_widget.container.removeEventFilter(self)
         self._referencia_widget = widget
         if widget is not None:
             widget.installEventFilter(self)
+            if hasattr(widget, "container") and widget.container is not None:
+                widget.container.installEventFilter(self)
 
     def _reposicionar_na_referencia(self):
         if self._referencia_widget is None or not self.isVisible():
             return
-        origem = self._referencia_widget.mapToGlobal(QPoint(0, 0))
-        self.ajustar_posicao_ao_espaco(
-            QRect(origem.x(), origem.y(), self._referencia_widget.width(), self._referencia_widget.height())
-        )
+        if hasattr(self._referencia_widget, "rect_container_global"):
+            rect = self._referencia_widget.rect_container_global()
+        else:
+            origem = self._referencia_widget.mapToGlobal(QPoint(0, 0))
+            rect = QRect(origem.x(), origem.y(), self._referencia_widget.width(), self._referencia_widget.height())
+        self.ajustar_posicao_ao_espaco(rect)
 
     def ajustar_posicao_ao_espaco(self, referencia):
         if not referencia:
@@ -974,7 +987,7 @@ class JanelaCalendario(QWidget):
             return
         tela = tela_principal.availableGeometry()
         margem = 6
-        espacamento = 4
+        espacamento = getattr(self._referencia_widget, 'espacamento_container', 4) if self._referencia_widget else 4
         largura = self.width()
         abaixo = referencia.bottom() + 1 + espacamento
         espaco_abaixo = tela.bottom() + 1 - margem - abaixo
@@ -1003,7 +1016,8 @@ class JanelaCalendario(QWidget):
         self.setGeometry(esquerda, topo, largura, altura)
 
     def eventFilter(self, obj, event):
-        if obj is self._referencia_widget and event.type() in (
+        alvo_ref = (self._referencia_widget, getattr(self._referencia_widget, "container", None))
+        if obj in alvo_ref and event.type() in (
             QEvent.Type.Move, QEvent.Type.Resize,
         ):
             if self.isVisible():
