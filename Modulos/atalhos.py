@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import subprocess
 import time
 import uuid
@@ -21,8 +22,8 @@ from workers import WorkerMonitorProcessos
 from ui_components import OutlineLabel, WrapLabel
 from utils import aplicar_css_fonte_base
 
-LARGURA_NOME_ATALHO = 130
-LARGURA_DETALHE_ATALHO = 130
+LARGURA_NOME_ATALHO = 80
+LARGURA_DETALHE_ATALHO = 120
 ARQUIVO_ATALHOS_V2 = os.path.join(APPDATA_DIR, "atalhos_v2.json")
 
 
@@ -292,7 +293,7 @@ class BotaoAtalhoArrastavel(QPushButton):
 
 class Plugin(PluginBase):
     nome = "Atalhos"
-    versao = "1.0.2"
+    versao = "1.0.3"
     dependencias = []
 
     def __init__(self, app):
@@ -300,6 +301,7 @@ class Plugin(PluginBase):
         self.atalhos_store = AtalhosStore(config_app)
         self.atalho_atual_idx = None
         self._ultimo_check_processos = time.monotonic()
+        self._ultimo_salvamento_tempos = time.monotonic()
         self._nomes_processo_cache = {}
         self._icon_cache = {}
         self._provider = QFileIconProvider()
@@ -336,7 +338,8 @@ class Plugin(PluginBase):
         # Subpágina: Detalhes do Atalho
         self.atalhos_detail_page = QWidget()
         layout_detalhes = QVBoxLayout(self.atalhos_detail_page)
-        layout_detalhes.setContentsMargins(10, 10, 10, 10)
+        layout_detalhes.setContentsMargins(6, 6, 6, 14)
+        layout_detalhes.setSpacing(4)
 
         self.btn_voltar_atalho = QPushButton("<")
         self.btn_voltar_atalho.setFixedSize(24, 24)
@@ -493,6 +496,7 @@ class Plugin(PluginBase):
         if not self.atalhos_store.mover(origem, destino):
             return
 
+        self._nomes_processo_cache.clear()
         if self.atalho_atual_idx is not None:
             if self.atalho_atual_idx == origem:
                 self.atalho_atual_idx = destino
@@ -509,6 +513,7 @@ class Plugin(PluginBase):
         )
         if caminho:
             self._icon_cache.pop(caminho, None)
+            self._nomes_processo_cache.clear()
             if self.atalhos_store.adicionar(caminho):
                 self.atualizar_botoes_atalhos()
 
@@ -535,6 +540,7 @@ class Plugin(PluginBase):
 
     def fechar_paineis(self):
         self.voltar_para_grade()
+        self.atalhos_store.salvar_tempos()
 
     def ao_desativar_pagina(self, pagina=None):
         self.fechar_paineis()
@@ -560,6 +566,7 @@ class Plugin(PluginBase):
             self.app, "Renomear Atalho", "Digite o novo nome para o atalho:", text=nome_atual
         )
         if ok and novo_nome.strip():
+            self._nomes_processo_cache.clear()
             self.atalhos_store.renomear(caminho, novo_nome.strip())
             self.lbl_nome_atalho.setText(novo_nome.strip())
             self.lbl_nome_atalho.ajustar_para_largura(LARGURA_NOME_ATALHO, max_linhas=2)
@@ -576,6 +583,7 @@ class Plugin(PluginBase):
         )
         if resposta == QMessageBox.StandardButton.Yes:
             self._icon_cache.pop(caminho, None)
+            self._nomes_processo_cache.clear()
             self.atalhos_store.remover(self.atalho_atual_idx)
             self.voltar_para_grade()
             self.atualizar_botoes_atalhos()
@@ -609,21 +617,43 @@ class Plugin(PluginBase):
 
     def processar_nomes_rodando(self, nomes_rodando):
         if not config_app.monitorar_tempo_atalhos:
+            self._ultimo_check_processos = time.monotonic()
             return
 
         agora = time.monotonic()
-        delta = agora - self._ultimo_check_processos
+        delta = max(0.0, min(2.0, agora - self._ultimo_check_processos))
         self._ultimo_check_processos = agora
 
-        if delta <= 0 or delta > 10:
+        if delta <= 0:
             return
 
         atalhos = self.atalhos_store.caminhos()
         houve_alteracao = False
+        nomes_rodando_set = set(n.lower() for n in nomes_rodando)
 
         for idx, caminho in enumerate(atalhos):
-            nomes_possiveis = self._nomes_processo_do_atalho(caminho)
-            if any(nome.lower() in nomes_rodando for nome in nomes_possiveis):
+            candidatos = self._nomes_processo_do_atalho(caminho)
+            is_running = False
+
+            # 1. Correspondência exata direta com os processos ativos
+            for cand in candidatos:
+                if cand in nomes_rodando_set:
+                    is_running = True
+                    break
+
+            # 2. Se não achou exato, checa por prefixo e raiz do processo/executável
+            if not is_running:
+                for proc in nomes_rodando_set:
+                    proc_base = proc[:-4] if proc.endswith(".exe") else proc
+                    for cand in candidatos:
+                        cand_base = cand[:-4] if cand.endswith(".exe") else cand
+                        if len(cand_base) >= 3 and (proc_base.startswith(cand_base) or cand_base.startswith(proc_base)):
+                            is_running = True
+                            break
+                    if is_running:
+                        break
+
+            if is_running:
                 self.atalhos_store.incrementar_tempo(caminho, delta)
                 houve_alteracao = True
                 if self.atalho_atual_idx == idx:
@@ -631,7 +661,10 @@ class Plugin(PluginBase):
                     self.atualizar_label_tempo(segundos)
 
         if houve_alteracao:
-            self.atalhos_store.salvar_tempos()
+            # Salvar periodicamente a cada 10s para não sobrecarregar I/O do disco a cada 500ms
+            if agora - self._ultimo_salvamento_tempos >= 10.0:
+                self.atalhos_store.salvar_tempos()
+                self._ultimo_salvamento_tempos = agora
 
     def _nomes_processo_do_atalho(self, caminho):
         if not caminho:
@@ -640,27 +673,131 @@ class Plugin(PluginBase):
         if caminho_normalizado in self._nomes_processo_cache:
             return self._nomes_processo_cache[caminho_normalizado]
 
-        nomes = []
-        base = os.path.basename(caminho)
-        nome_base, ext = os.path.splitext(base)
+        candidatos = set()
+        caminho_real = os.path.normpath(caminho)
+        base_arquivo = os.path.basename(caminho_real).lower()
+        stem_arquivo, ext = os.path.splitext(base_arquivo)
 
-        if ext.lower() == ".exe":
-            nomes.append(base.lower())
-        elif ext.lower() == ".lnk":
-            nomes.append(nome_base.lower() + ".exe")
+        if base_arquivo:
+            candidatos.add(base_arquivo)
+        if stem_arquivo:
+            candidatos.add(stem_arquivo)
+            candidatos.add(stem_arquivo + ".exe")
+            stem_limpo = re.sub(
+                r"[\-_]?(launcher|shell|runtime|client|driver|win|x64|x86).*$",
+                "",
+                stem_arquivo,
+                flags=re.IGNORECASE,
+            ).strip()
+            if len(stem_limpo) >= 3:
+                candidatos.add(stem_limpo)
+                candidatos.add(stem_limpo + ".exe")
+
+        # Se for atalho .lnk
+        if ext == ".lnk" and os.path.exists(caminho_real):
+            alvos_encontrados = set()
             try:
-                cmd = f'(New-Object -COM WScript.Shell).CreateShortcut("{caminho}").TargetPath'
-                res = subprocess.check_output(["powershell", "-NoProfile", "-Command", cmd], text=True, timeout=2).strip()
-                if res and res.lower().endswith(".exe"):
-                    nomes.append(os.path.basename(res).lower())
+                with open(caminho_real, "rb") as f:
+                    data = f.read()
+                # Extração binária ultrarrápida de alvos .exe do atalho
+                for m in re.finditer(rb'[a-zA-Z]:\\[^\x00-\x1f<>"|?*]+\.exe', data, re.IGNORECASE):
+                    alvos_encontrados.add(m.group().decode("latin-1", errors="ignore"))
+                for m in re.finditer(rb'(?:[a-zA-Z]\x00:\x00\\(?:[^\x00-\x1f<>"|?*]\x00)+\.exe)', data, re.IGNORECASE):
+                    alvos_encontrados.add(m.group().decode("utf-16le", errors="ignore"))
             except Exception:
                 pass
-        else:
-            nomes.append(base.lower())
 
-        nomes = list(set(nomes))
-        self._nomes_processo_cache[caminho_normalizado] = nomes
-        return nomes
+            # Fallback seguro via PowerShell
+            if not alvos_encontrados:
+                try:
+                    comando = [
+                        "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                        "-Command",
+                        "$p = [Console]::In.ReadLine(); "
+                        "$s = (New-Object -ComObject WScript.Shell).CreateShortcut($p); "
+                        "[Console]::Write($s.TargetPath + '|' + $s.Arguments)"
+                    ]
+                    proc_res = subprocess.run(
+                        comando,
+                        input=caminho_real,
+                        creationflags=0x08000000,
+                        text=True,
+                        capture_output=True,
+                        timeout=2
+                    )
+                    saida = (proc_res.stdout or "").strip()
+                    if saida:
+                        partes = saida.split("|", 1)
+                        if partes[0].strip():
+                            alvos_encontrados.add(partes[0].strip())
+                        if len(partes) > 1 and partes[1].strip():
+                            for m in re.finditer(r"[\w\-.]+\.exe", partes[1], re.IGNORECASE):
+                                candidatos.add(m.group().lower())
+                except Exception:
+                    pass
+
+            for alvo in alvos_encontrados:
+                alvo_base = os.path.basename(alvo).lower()
+                alvo_stem, _ = os.path.splitext(alvo_base)
+                if alvo_base:
+                    candidatos.add(alvo_base)
+                if alvo_stem:
+                    candidatos.add(alvo_stem)
+                    candidatos.add(alvo_stem + ".exe")
+                    alvo_limpo = re.sub(
+                        r"[\-_]?(launcher|shell|runtime|client|driver|win|x64|x86).*$",
+                        "",
+                        alvo_stem,
+                        flags=re.IGNORECASE,
+                    ).strip()
+                    if len(alvo_limpo) >= 3:
+                        candidatos.add(alvo_limpo)
+                        candidatos.add(alvo_limpo + ".exe")
+
+                # Detectar processos irmãos na mesma pasta do executável alvo (ex: stremio-runtime.exe)
+                pasta_alvo = os.path.dirname(alvo)
+                if os.path.isdir(pasta_alvo):
+                    try:
+                        prefixo = alvo_stem.split("-")[0].split("_")[0]
+                        if len(prefixo) >= 3:
+                            for item in os.listdir(pasta_alvo):
+                                if item.lower().endswith(".exe") and item.lower().startswith(prefixo):
+                                    candidatos.add(item.lower())
+                    except Exception:
+                        pass
+
+        elif ext == ".exe":
+            pasta = os.path.dirname(caminho_real)
+            stem_limpo = re.sub(
+                r"[\-_]?(launcher|shell|runtime|client|driver|win|x64|x86).*$",
+                "",
+                stem_arquivo,
+                flags=re.IGNORECASE,
+            ).strip()
+            if os.path.isdir(pasta) and len(stem_limpo) >= 3:
+                try:
+                    for raiz, _, arquivos in os.walk(pasta):
+                        for arq in arquivos:
+                            if arq.lower().endswith(".exe") and arq.lower().startswith(stem_limpo):
+                                candidatos.add(arq.lower())
+                except Exception:
+                    pass
+
+        # Adicionar nome customizado se existir
+        nome_custom = self.atalhos_store.nome_customizado(caminho)
+        if nome_custom:
+            nc = nome_custom.strip().lower()
+            nc_sem_espaco = nc.replace(" ", "")
+            if len(nc) >= 3:
+                candidatos.add(nc)
+                candidatos.add(nc + ".exe")
+            if len(nc_sem_espaco) >= 3:
+                candidatos.add(nc_sem_espaco)
+                candidatos.add(nc_sem_espaco + ".exe")
+
+        res = [c.lower() for c in candidatos if c]
+        self._nomes_processo_cache[caminho_normalizado] = res
+        return res
 
     def _obter_area_segura(self):
         area = self.page.property("mussas_safe_area")
