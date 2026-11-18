@@ -18,7 +18,7 @@ from PyQt6.QtWidgets import (
 from gerenciador_modulos import PluginBase
 from config import config_app, APPDATA_DIR
 from workers import WorkerMonitorProcessos
-from ui_components import OutlineLabel, ClickableLabel
+from ui_components import OutlineLabel, WrapLabel
 from utils import aplicar_css_fonte_base
 
 LARGURA_NOME_ATALHO = 130
@@ -292,7 +292,7 @@ class BotaoAtalhoArrastavel(QPushButton):
 
 class Plugin(PluginBase):
     nome = "Atalhos"
-    versao = "1.0.1"
+    versao = "1.0.2"
     dependencias = []
 
     def __init__(self, app):
@@ -343,7 +343,7 @@ class Plugin(PluginBase):
         self.btn_voltar_atalho.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_voltar_atalho.clicked.connect(self.voltar_para_grade)
 
-        self.lbl_nome_atalho = ClickableLabel("App")
+        self.lbl_nome_atalho = WrapLabel("App", clicavel=True)
         self.lbl_nome_atalho.setToolTip("Clique para renomear")
         self.lbl_nome_atalho.setCursor(Qt.CursorShape.PointingHandCursor)
         self.lbl_nome_atalho.clicked.connect(self.renomear_atalho_atual)
